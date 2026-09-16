@@ -27,6 +27,7 @@
 #include <unistd.h>
 #include <vulkan/vulkan.h>
 
+#include <stdio.h>
 #include "pvr_srv_job_null.h"
 #include "pvr_srv_sync.h"
 #include "pvr_winsys.h"

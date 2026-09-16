@@ -28,6 +28,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -222,6 +223,26 @@ static void pvr_srv_render_ctx_fw_static_state_init(
    }
 }
 
+/* The firmware kills any job whose context deadline has passed, and treats a
+ * deadline of zero as already expired -- so a context must be given a real
+ * one. It is stored in milliseconds and converted to timer ticks by the
+ * firmware, which overflows 32 bits past about 214 seconds at the 20 MHz SoC
+ * timer, so "infinity" is not available: this is simply a value no legitimate
+ * job can reach. */
+#define PVR_CONTEXT_DEADLINE_MS_DEFAULT 60000u
+
+static uint32_t pvr_context_deadline_ms(void)
+{
+   static uint32_t v;
+   if (!v) {
+      const char *e = getenv("PVR_CONTEXT_DEADLINE_MS");
+      v = e ? (uint32_t)strtoul(e, NULL, 0) : PVR_CONTEXT_DEADLINE_MS_DEFAULT;
+      if (!v)
+         v = PVR_CONTEXT_DEADLINE_MS_DEFAULT;
+   }
+   return v;
+}
+
 VkResult pvr_srv_winsys_render_ctx_create(
    struct pvr_winsys *ws,
    struct pvr_winsys_render_ctx_create_info *create_info,
@@ -271,8 +292,8 @@ VkResult pvr_srv_winsys_render_ctx_create(
       0,
       RGX_CONTEXT_FLAG_DISABLESLR,
       0,
-      UINT_MAX,
-      UINT_MAX,
+      pvr_context_deadline_ms(),
+      pvr_context_deadline_ms(),
       &srv_ctx->handle);
    if (result != VK_SUCCESS)
       goto err_close_timeline_frag;

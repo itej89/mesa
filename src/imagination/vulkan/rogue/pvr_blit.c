@@ -1,3 +1,11 @@
+#include <stdlib.h>
+static int pvr_dbg_on(void)
+{
+   static int v = -1;
+   if (v < 0)
+      v = getenv("PVR_BRIDGE_DEBUG") ? 1 : 0;
+   return v;
+}
 /*
  * Copyright © 2022 Imagination Technologies Ltd.
  *
@@ -52,6 +60,18 @@
 #include "vk_command_pool.h"
 #include "vk_format.h"
 #include "vk_log.h"
+
+
+/* PVR_BLIT_DEBUG=1: report blit/clear failures that are otherwise discarded. */
+#include <stdlib.h>
+#include <stdio.h>
+static inline void pvr_blit_report(const char *fn, int line, VkResult r)
+{
+   if (r != VK_SUCCESS && getenv("PVR_BLIT_DEBUG"))
+      if (pvr_dbg_on()) {
+         fprintf(stderr, "PVRBLIT FAIL %s:%d VkResult=%d\n", fn, line, (int)r);
+      }
+}
 
 /* TODO: Investigate where this limit comes from. */
 #define PVR_MAX_TRANSFER_SIZE_IN_TEXELS 2048U
@@ -250,6 +270,82 @@ static void pvr_setup_transfer_surface(struct pvr_device *device,
    }
 }
 
+
+/* Maximum destination pixels per transfer sub-command; see
+ * fix-blit-band-regions.py. 0 disables banding. */
+static uint32_t pvr_blit_band_px(void)
+{
+   static uint32_t v = 0U;
+   static bool init = false;
+   if (!init) {
+      const char *e = getenv("PVR_BLIT_BAND_PX");
+      v = e ? (uint32_t)atoi(e) : 262144U;
+      init = true;
+   }
+   return v;
+}
+
+/* How many bands this region must be split into. Returns 1 for anything that
+ * is not a plain, axis-aligned, single-slice blit. */
+static uint32_t pvr_blit_band_count(const VkImageBlit2 *region)
+{
+   int32_t dy0 = region->dstOffsets[0].y, dy1 = region->dstOffsets[1].y;
+   int32_t dx0 = region->dstOffsets[0].x, dx1 = region->dstOffsets[1].x;
+   int32_t sy0 = region->srcOffsets[0].y, sy1 = region->srcOffsets[1].y;
+   uint32_t w, h, budget = pvr_blit_band_px();
+
+   if (budget == 0U)
+      return 1U;
+   /* Only split straightforward blits: no flips, single depth slice. */
+   if (dy1 <= dy0 || dx1 <= dx0 || sy1 <= sy0)
+      return 1U;
+   if (region->dstOffsets[1].z - region->dstOffsets[0].z != 1 ||
+       region->srcOffsets[1].z - region->srcOffsets[0].z != 1)
+      return 1U;
+
+   w = (uint32_t)(dx1 - dx0);
+   h = (uint32_t)(dy1 - dy0);
+   if (w == 0U || (uint64_t)w * h <= budget)
+      return 1U;
+
+   {
+      uint32_t rows = budget / w;
+      if (rows == 0U)
+         rows = 1U;
+      return (h + rows - 1U) / rows;
+   }
+}
+
+/* Build band b of n, scaling the source range to match. */
+static const VkImageBlit2 *pvr_blit_band(const VkImageBlit2 *region,
+                                         uint32_t b,
+                                         uint32_t n,
+                                         VkImageBlit2 *out)
+{
+   int32_t dy0, dy1, sy0, sy1, y0, y1;
+   uint32_t dh, sh;
+
+   if (n <= 1U)
+      return region;
+
+   *out = *region;
+   dy0 = region->dstOffsets[0].y;
+   dy1 = region->dstOffsets[1].y;
+   sy0 = region->srcOffsets[0].y;
+   sy1 = region->srcOffsets[1].y;
+   dh = (uint32_t)(dy1 - dy0);
+   sh = (uint32_t)(sy1 - sy0);
+
+   y0 = dy0 + (int32_t)((uint64_t)dh * b / n);
+   y1 = dy0 + (int32_t)((uint64_t)dh * (b + 1U) / n);
+
+   out->dstOffsets[0].y = y0;
+   out->dstOffsets[1].y = y1;
+   out->srcOffsets[0].y = sy0 + (int32_t)((uint64_t)(y0 - dy0) * sh / dh);
+   out->srcOffsets[1].y = sy0 + (int32_t)((uint64_t)(y1 - dy0) * sh / dh);
+   return out;
+}
+
 void pvr_rogue_CmdBlitImage2(VkCommandBuffer commandBuffer,
                              const VkBlitImageInfo2 *pBlitImageInfo)
 {
@@ -265,7 +361,13 @@ void pvr_rogue_CmdBlitImage2(VkCommandBuffer commandBuffer,
       filter = PVR_FILTER_LINEAR;
 
    for (uint32_t i = 0U; i < pBlitImageInfo->regionCount; i++) {
-      const VkImageBlit2 *region = &pBlitImageInfo->pRegions[i];
+      const VkImageBlit2 *orig_region = &pBlitImageInfo->pRegions[i];
+      const uint32_t band_count = pvr_blit_band_count(orig_region);
+
+      for (uint32_t band = 0U; band < band_count; band++) {
+      VkImageBlit2 banded_region;
+      const VkImageBlit2 *region =
+         pvr_blit_band(orig_region, band, band_count, &banded_region);
 
       assert(region->srcSubresource.layerCount ==
              region->dstSubresource.layerCount);
@@ -463,7 +565,8 @@ void pvr_rogue_CmdBlitImage2(VkCommandBuffer commandBuffer,
          }
       }
    }
-}
+   }
+   }
 
 static VkFormat pvr_get_copy_format(VkFormat format,
                                     VkImageAspectFlagBits aspect)
@@ -1036,8 +1139,9 @@ void pvr_rogue_CmdCopyBufferToImage2(
                                          src->dev_addr,
                                          dst,
                                          &pCopyBufferToImageInfo->pRegions[i]);
-      if (result != VK_SUCCESS)
-         return;
+      pvr_blit_report(__func__, __LINE__, result);
+         if (result != VK_SUCCESS)
+            return;
    }
 }
 
@@ -1080,6 +1184,16 @@ pvr_copy_image_to_buffer_region_format(struct pvr_cmd_buffer *const cmd_buffer,
                        vk_format_get_blocksize(dst_format);
 
    max_depth_slice = region->imageExtent.depth + region->imageOffset.z;
+
+   if (getenv("PVR_I2B_DEBUG"))
+      fprintf(stderr,
+              "PVRI2B bounds: baseLayer=%u max_layers=%u  z=%d max_depth=%u  "
+              "extent=%ux%ux%u rowlen=%u imgheight=%u\n",
+              region->imageSubresource.baseArrayLayer, max_array_layers,
+              region->imageOffset.z, max_depth_slice,
+              region->imageExtent.width, region->imageExtent.height,
+              region->imageExtent.depth,
+              buffer_row_length, buffer_image_height);
 
    pvr_setup_buffer_surface(
       &dst_surface,
@@ -1156,6 +1270,45 @@ pvr_copy_image_to_buffer_region_format(struct pvr_cmd_buffer *const cmd_buffer,
          transfer_cmd->dst = dst_surface;
          transfer_cmd->scissor = dst_rect;
 
+         /* The working buffer-to-buffer copy leaves surface.depth at 0; the
+          * image path sets 1. depth bounds z_position for 3D textures, so a
+          * non-zero value may select a different sampling path. Test it. */
+         if (getenv("PVR_I2B_DEPTH0"))
+            transfer_cmd->sources[0].surface.depth = 0;
+
+         if (getenv("PVR_I2B_DEBUG"))
+            fprintf(stderr,
+                    "PVRI2B i2b: src addr=0x%llx stride=%u layout=%d fmt=%d %ux%u d=%u z=%.1f"
+                    " -> dst addr=0x%llx stride=%u layout=%d fmt=%d %ux%u"
+                    " scissor=%dx%d+%d+%d srcs=%u flags=0x%x maps=%u srect=%dx%d+%d+%d drect=%dx%d+%d+%d\n",
+                    (unsigned long long)transfer_cmd->sources[0].surface.dev_addr.addr,
+                    transfer_cmd->sources[0].surface.stride,
+                    (int)transfer_cmd->sources[0].surface.mem_layout,
+                    (int)transfer_cmd->sources[0].surface.vk_format,
+                    transfer_cmd->sources[0].surface.width,
+                    transfer_cmd->sources[0].surface.height,
+                    transfer_cmd->sources[0].surface.depth,
+                    transfer_cmd->sources[0].surface.z_position,
+                    (unsigned long long)transfer_cmd->dst.dev_addr.addr,
+                    transfer_cmd->dst.stride,
+                    (int)transfer_cmd->dst.mem_layout,
+                    (int)transfer_cmd->dst.vk_format,
+                    transfer_cmd->dst.width, transfer_cmd->dst.height,
+                    transfer_cmd->scissor.extent.width,
+                    transfer_cmd->scissor.extent.height,
+                    transfer_cmd->scissor.offset.x,
+                    transfer_cmd->scissor.offset.y,
+                    transfer_cmd->source_count,
+                    transfer_cmd->flags,
+                    transfer_cmd->sources[0].mapping_count,
+                    transfer_cmd->sources[0].mappings[0].src_rect.extent.width,
+                    transfer_cmd->sources[0].mappings[0].src_rect.extent.height,
+                    transfer_cmd->sources[0].mappings[0].src_rect.offset.x,
+                    transfer_cmd->sources[0].mappings[0].src_rect.offset.y,
+                    transfer_cmd->sources[0].mappings[0].dst_rect.extent.width,
+                    transfer_cmd->sources[0].mappings[0].dst_rect.extent.height,
+                    transfer_cmd->sources[0].mappings[0].dst_rect.offset.x,
+                    transfer_cmd->sources[0].mappings[0].dst_rect.offset.y);
          result =
             pvr_arch_cmd_buffer_add_transfer_cmd(cmd_buffer, transfer_cmd);
          if (result != VK_SUCCESS) {
@@ -1232,6 +1385,10 @@ void pvr_rogue_CmdCopyImageToBuffer2(
 
    PVR_CHECK_COMMAND_BUFFER_BUILDING_STATE(cmd_buffer);
 
+   if (getenv("PVR_I2B_DEBUG"))
+      fprintf(stderr, "PVRI2B entry: CmdCopyImageToBuffer2 regions=%u\n",
+              pCopyImageToBufferInfo->regionCount);
+
    for (uint32_t i = 0U; i < pCopyImageToBufferInfo->regionCount; i++) {
       const VkBufferImageCopy2 *region = &pCopyImageToBufferInfo->pRegions[i];
 
@@ -1239,8 +1396,9 @@ void pvr_rogue_CmdCopyImageToBuffer2(
                                                               src,
                                                               dst->dev_addr,
                                                               region);
-      if (result != VK_SUCCESS)
-         return;
+      pvr_blit_report(__func__, __LINE__, result);
+         if (result != VK_SUCCESS)
+            return;
    }
 }
 
@@ -1328,14 +1486,18 @@ void pvr_rogue_CmdClearColorImage(VkCommandBuffer commandBuffer,
                                   uint32_t rangeCount,
                                   const VkImageSubresourceRange *pRanges)
 {
+   if (getenv("PVR_SUBMIT_DEBUG"))
+      fprintf(stderr, "PVRSUBMIT clear: pvr_rogue_CmdClearColorImage\n");
+
    VK_FROM_HANDLE(pvr_cmd_buffer, cmd_buffer, commandBuffer);
    VK_FROM_HANDLE(pvr_image, image, _image);
 
    for (uint32_t i = 0; i < rangeCount; i++) {
       const VkResult result =
          pvr_clear_image_range(cmd_buffer, image, pColor, &pRanges[i], 0);
-      if (result != VK_SUCCESS)
-         return;
+      pvr_blit_report(__func__, __LINE__, result);
+         if (result != VK_SUCCESS)
+            return;
    }
 }
 
@@ -1418,7 +1580,7 @@ static VkResult pvr_cmd_copy_buffer_region(struct pvr_cmd_buffer *cmd_buffer,
          vk_format = VK_FORMAT_R32_UINT;
          texel_width = 4U;
       } else if (remaining_size >= 16U && (src_align % 16U) == 0 &&
-                 (dst_align % 16U) == 0) {
+                 (dst_align % 16U) == 0 && !getenv("PVR_FORCE_R32")) {
          /* Only if address is 128bpp aligned */
          vk_format = VK_FORMAT_R32G32B32A32_UINT;
          texel_width = 16U;
@@ -1442,6 +1604,22 @@ static VkResult pvr_cmd_copy_buffer_region(struct pvr_cmd_buffer *cmd_buffer,
       } else {
          width = texels;
          height = 1;
+      }
+
+      /* Reshape a linear buffer copy into a multi-row rect, to test whether a
+       * source rect taller than one row is what breaks image-to-buffer.
+       */
+      {
+         const char *force_2d = getenv("PVR_FORCE_2D");
+
+         if (force_2d && height == 1) {
+            uint32_t w = (uint32_t)atoi(force_2d);
+
+            if (w > 0 && w <= width && (texels % w) == 0) {
+               width = w;
+               height = (uint32_t)(texels / w);
+            }
+         }
       }
 
       transfer_cmd = pvr_transfer_cmd_alloc(cmd_buffer);
@@ -1483,6 +1661,40 @@ static VkResult pvr_cmd_copy_buffer_region(struct pvr_cmd_buffer *cmd_buffer,
          transfer_cmd->sources[0].mapping_count++;
       }
 
+      if (getenv("PVR_I2B_DEBUG"))
+         fprintf(stderr,
+                 "PVRI2B b2b: srcs=%u src addr=0x%llx stride=%u layout=%d fmt=%d %ux%u d=%u z=%.1f"
+                 " -> dst addr=0x%llx stride=%u layout=%d fmt=%d %ux%u"
+                 " scissor=%dx%d+%d+%d srcs=%u flags=0x%x maps=%u srect=%dx%d+%d+%d drect=%dx%d+%d+%d\n",
+                 transfer_cmd->source_count,
+                 (unsigned long long)transfer_cmd->sources[0].surface.dev_addr.addr,
+                 transfer_cmd->sources[0].surface.stride,
+                 (int)transfer_cmd->sources[0].surface.mem_layout,
+                 (int)transfer_cmd->sources[0].surface.vk_format,
+                 transfer_cmd->sources[0].surface.width,
+                 transfer_cmd->sources[0].surface.height,
+                 transfer_cmd->sources[0].surface.depth,
+                 transfer_cmd->sources[0].surface.z_position,
+                 (unsigned long long)transfer_cmd->dst.dev_addr.addr,
+                 transfer_cmd->dst.stride,
+                 (int)transfer_cmd->dst.mem_layout,
+                 (int)transfer_cmd->dst.vk_format,
+                 transfer_cmd->dst.width, transfer_cmd->dst.height,
+                 transfer_cmd->scissor.extent.width,
+                 transfer_cmd->scissor.extent.height,
+                 transfer_cmd->scissor.offset.x,
+                 transfer_cmd->scissor.offset.y,
+                 transfer_cmd->source_count,
+                 transfer_cmd->flags,
+                 transfer_cmd->sources[0].mapping_count,
+                 transfer_cmd->sources[0].mappings[0].src_rect.extent.width,
+                 transfer_cmd->sources[0].mappings[0].src_rect.extent.height,
+                 transfer_cmd->sources[0].mappings[0].src_rect.offset.x,
+                 transfer_cmd->sources[0].mappings[0].src_rect.offset.y,
+                 transfer_cmd->sources[0].mappings[0].dst_rect.extent.width,
+                 transfer_cmd->sources[0].mappings[0].dst_rect.extent.height,
+                 transfer_cmd->sources[0].mappings[0].dst_rect.offset.x,
+                 transfer_cmd->sources[0].mappings[0].dst_rect.offset.y);
       result = pvr_arch_cmd_buffer_add_transfer_cmd(cmd_buffer, transfer_cmd);
       if (result != VK_SUCCESS) {
          vk_free(&cmd_buffer->vk.pool->alloc, transfer_cmd);
@@ -1542,8 +1754,9 @@ void pvr_rogue_CmdCopyBuffer2(VkCommandBuffer commandBuffer,
                                     pCopyBufferInfo->pRegions[i].size,
                                     0U,
                                     false);
-      if (result != VK_SUCCESS)
-         return;
+      pvr_blit_report(__func__, __LINE__, result);
+         if (result != VK_SUCCESS)
+            return;
    }
 }
 
@@ -2469,6 +2682,9 @@ void pvr_rogue_CmdClearAttachments(VkCommandBuffer commandBuffer,
                                    uint32_t rectCount,
                                    const VkClearRect *pRects)
 {
+   if (getenv("PVR_SUBMIT_DEBUG"))
+      fprintf(stderr, "PVRSUBMIT clear: pvr_rogue_CmdClearAttachments\n");
+
    VK_FROM_HANDLE(pvr_cmd_buffer, cmd_buffer, commandBuffer);
    struct pvr_cmd_buffer_state *state = &cmd_buffer->state;
    struct pvr_sub_cmd_gfx *sub_cmd = &state->current_sub_cmd->gfx;

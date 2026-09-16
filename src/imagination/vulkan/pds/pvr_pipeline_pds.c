@@ -1,3 +1,11 @@
+#include <stdlib.h>
+static int pvr_dbg_on(void)
+{
+   static int v = -1;
+   if (v < 0)
+      v = getenv("PVR_BRIDGE_DEBUG") ? 1 : 0;
+   return v;
+}
 /*
  * Copyright © 2022 Imagination Technologies Ltd.
  *
@@ -1668,7 +1676,9 @@ void pvr_pds_generate_descriptor_upload_program(
    }
 
    if (total_dma_count != running_dma_count)
-      fprintf(stderr, "Mismatch in DMA count\n");
+      if (pvr_dbg_on()) {
+         fprintf(stderr, "Mismatch in DMA count\n");
+      }
 
    if (input_program->secondary_program_present) {
       struct pvr_const_map_entry_doutu_address *doutu_address;

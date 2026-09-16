@@ -186,6 +186,30 @@ draw_indexed_need_index_buffer_unref(struct zink_context *ctx,
    }
 }
 
+
+/* This GPU completes only a bounded amount of rendering per submit (~3400
+ * 16x16 tiles) and silently drops the rest. zink_batch_no_rp_safe() charges
+ * each finished render pass against this budget; the flush happens here
+ * because this is the one mid-frame flush point zink already uses and trusts.
+ * Flushing from inside the render-pass paths either had no effect or
+ * deadlocked. ZINK_RENDER_TILE_BUDGET overrides; 0 disables.
+ */
+static bool
+zink_over_tile_budget(struct zink_context *ctx)
+{
+   static int budget = -1;
+
+   if (budget < 0) {
+      const char *e = getenv("ZINK_RENDER_TILE_BUDGET");
+
+      budget = e ? atoi(e) : 2048;
+      if (budget < 0)
+         budget = 0;
+   }
+
+   return budget && ctx->render_tiles_this_batch >= (uint32_t)budget;
+}
+
 template <zink_multidraw HAS_MULTIDRAW>
 ALWAYS_INLINE static void
 draw_indexed(struct zink_context *ctx,
@@ -969,8 +993,11 @@ zink_draw(struct pipe_context *pctx,
       zink_select_draw_mesh_tasks(ctx);
    }
    /* flush if there's >100k draws */
-   if (!ctx->unordered_blitting && (unlikely(work_count >= 30000) || ctx->oom_flush))
+   if (!ctx->unordered_blitting && (unlikely(work_count >= 30000) || ctx->oom_flush ||
+                                    zink_over_tile_budget(ctx))) {
+      ctx->render_tiles_this_batch = 0;
       pctx->flush(pctx, NULL, 0);
+   }
 }
 
 
@@ -1140,8 +1167,11 @@ zink_draw_mesh_tasks(struct pipe_context *pctx, const struct pipe_grid_info *inf
       zink_select_draw_vbo(ctx);
    }
    /* flush if there's >100k draws */
-   if (!ctx->unordered_blitting && (unlikely(work_count >= 30000) || ctx->oom_flush))
+   if (!ctx->unordered_blitting && (unlikely(work_count >= 30000) || ctx->oom_flush ||
+                                    zink_over_tile_budget(ctx))) {
+      ctx->render_tiles_this_batch = 0;
       pctx->flush(pctx, NULL, 0);
+   }
 }
 
 template <zink_multidraw HAS_MULTIDRAW, zink_dynamic_state DYNAMIC_STATE, bool BATCH_CHANGED>

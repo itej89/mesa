@@ -1,3 +1,4 @@
+#include <stdlib.h>
 /*
  * Copyright © 2022 Imagination Technologies Ltd.
  *
@@ -48,6 +49,16 @@
 
 static void pvr_image_init_memlayout(struct pvr_image *image)
 {
+   /* Experiment gate: see try-linear-color-attachments.py. */
+   static int force_linear_rt = -1;
+   if (force_linear_rt < 0)
+      force_linear_rt = getenv("PVR_FORCE_LINEAR_RT") ? 1 : 0;
+   if (force_linear_rt &&
+       (image->vk.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) {
+      image->memlayout = PVR_MEMLAYOUT_LINEAR;
+      return;
+   }
+
    switch (image->vk.tiling) {
    default:
       UNREACHABLE("bad VkImageTiling");

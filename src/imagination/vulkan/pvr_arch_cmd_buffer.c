@@ -797,6 +797,22 @@ pvr_load_op_constants_create_and_upload(struct pvr_cmd_buffer *cmd_buffer,
                                 clear_value->color,
                                 &hw_clear_value[next_clear_consts]);
 
+      /* What colour a load-op clear actually carries. GLES reads back black
+       * through this path while the same Vulkan work is correct, and the
+       * render is known to run and to target the right address -- so the
+       * value it writes is the remaining question. */
+      if (getenv("PVR_SUBMIT_DEBUG")) {
+         fprintf(stderr,
+                 "PVRCLEAR load-op: attachment %u vk=(%f %f %f %f) hw=%08x %08x %08x %08x\n",
+                 attachment_idx,
+                 clear_value->color.float32[0], clear_value->color.float32[1],
+                 clear_value->color.float32[2], clear_value->color.float32[3],
+                 hw_clear_value[next_clear_consts + 0],
+                 hw_clear_value[next_clear_consts + 1],
+                 hw_clear_value[next_clear_consts + 2],
+                 hw_clear_value[next_clear_consts + 3]);
+      }
+
          next_clear_consts += DIV_ROUND_UP(accum_fmt_size, sizeof(uint32_t));
       }
    }
@@ -1150,8 +1166,14 @@ static void pvr_setup_pbe_state(
    /* FIXME: Should we have an inline function to return the address of a mip
     * level?
     */
+   /* image->dev_addr, not image->vma->dev_addr: the vma is the base of the
+    * memory mapping, while dev_addr is that base plus the offset the image was
+    * bound at. They differ for any suballocated image (zink binds all of its
+    * images into shared allocations), and using the vma made the render write
+    * memoryOffset bytes below the image, into unrelated objects.
+    */
    surface_params.addr = PVR_DEV_ADDR_OFFSET(
-      image->vma->dev_addr,
+      image->dev_addr,
       plane->layer_size * view_index +
          plane->mip_levels[iview->vk.base_mip_level].offset);
 

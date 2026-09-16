@@ -1,3 +1,4 @@
+#include <stdlib.h>
 /*
  * Copyright © 2022 Imagination Technologies Ltd.
  *
@@ -5570,6 +5571,16 @@ pvr_modify_command(struct pvr_transfer_custom_mapping *custom_mapping,
 /* Route a copy_blit (FastScale HW) to a clip_blit (Fast2D HW).
  * Destination rectangle can be specified in dst_rect, or NULL to use existing.
  */
+
+/* Experiment gate: see try-force-clip-blit.py. */
+static int pvr_tq_force_clip(void)
+{
+   static int v = -1;
+   if (v < 0)
+      v = getenv("PVR_TQ_FORCE_CLIP") ? 1 : 0;
+   return v;
+}
+
 static VkResult pvr_reroute_to_clip(struct pvr_transfer_ctx *ctx,
                                     const struct pvr_transfer_cmd *transfer_cmd,
                                     const struct VkRect2D *dst_rect,
@@ -5594,6 +5605,99 @@ static VkResult pvr_reroute_to_clip(struct pvr_transfer_ctx *ctx,
    }
 
    return vk_error(ctx->device, VK_ERROR_FORMAT_NOT_SUPPORTED);
+}
+
+
+/* Tile budget for one transfer-queue job. The hardware truncates a copy that
+ * covers appreciably more than this without reporting an error; see
+ * fix-transfer-banding.py for the measurements behind the number.
+ */
+static uint32_t pvr_tq_max_tiles(void)
+{
+   static uint32_t v = 0U;
+   if (v == 0U) {
+      const char *e = getenv("PVR_TQ_MAX_TILES");
+      /* Off by default: banding was implemented and verified to split
+       * correctly (3 exact bands for a 1024x600 copy) but did NOT fix the
+       * truncation -- the total copied stays ~341k pixels whether the work is
+       * one job or three, and whether those go in one submit or three. So the
+       * cap is not per-job. Kept, disabled, as machinery for further
+       * experiments; set PVR_TQ_MAX_TILES to enable. */
+      v = e ? (uint32_t)atoi(e) : 0U;
+   }
+   return v;
+}
+
+/* Carve the pass_idx'th horizontal band out of an oversized copy.
+ *
+ * Returns false when the copy fits in one job (the overwhelmingly common case,
+ * so nothing changes for small blits). Otherwise fills *out with a copy of cmd
+ * restricted to this band and reports through last_band_out whether it is the
+ * final one.
+ */
+static bool pvr_transfer_band_cmd(const struct pvr_transfer_cmd *cmd,
+                                  uint32_t pass_idx,
+                                  struct pvr_transfer_cmd *out,
+                                  bool *last_band_out)
+{
+   const int32_t dst_y = cmd->scissor.offset.y;
+   const uint32_t dst_h = cmd->scissor.extent.height;
+   const uint32_t dst_w = cmd->scissor.extent.width;
+   uint32_t tiles_x, tiles_y, band_tile_rows, band_h;
+   int32_t y0;
+
+   if (dst_w == 0U || dst_h == 0U)
+      return false;
+
+   tiles_x = DIV_ROUND_UP(dst_w, 16U);
+   tiles_y = DIV_ROUND_UP(dst_h, 16U);
+   if (pvr_tq_max_tiles() == 0U ||
+       tiles_x * tiles_y <= pvr_tq_max_tiles())
+      return false;
+
+   /* Bands are whole tile rows so no band boundary falls inside a tile. */
+   band_tile_rows = MAX2(1U, pvr_tq_max_tiles() / MAX2(1U, tiles_x));
+   band_h = band_tile_rows * 16U;
+
+   y0 = dst_y + (int32_t)(pass_idx * band_h);
+   if (y0 >= dst_y + (int32_t)dst_h)
+      return false;
+
+   *out = *cmd;
+   out->scissor.offset.y = y0;
+   out->scissor.extent.height = MIN2(band_h, (uint32_t)(dst_y + (int32_t)dst_h - y0));
+
+   for (uint32_t i = 0U; i < out->source_count; i++) {
+      struct pvr_transfer_cmd_source *src = &out->sources[i];
+
+      for (uint32_t m = 0U; m < src->mapping_count; m++) {
+         struct pvr_rect_mapping *map = &src->mappings[m];
+         const int32_t map_y = map->dst_rect.offset.y;
+         const uint32_t map_h = map->dst_rect.extent.height;
+         const uint32_t src_h = map->src_rect.extent.height;
+         int32_t new_y = MAX2(map_y, y0);
+         int32_t new_end = MIN2(map_y + (int32_t)map_h,
+                                y0 + (int32_t)out->scissor.extent.height);
+         uint32_t new_h = new_end > new_y ? (uint32_t)(new_end - new_y) : 0U;
+
+         if (map_h == 0U)
+            continue;
+
+         /* Track the destination band in the source, so a scaled blit stays
+          * correct rather than only a 1:1 copy.
+          */
+         map->src_rect.offset.y +=
+            (int32_t)(((int64_t)(new_y - map_y) * (int64_t)src_h) / (int64_t)map_h);
+         map->src_rect.extent.height =
+            (uint32_t)(((int64_t)new_h * (int64_t)src_h) / (int64_t)map_h);
+         map->dst_rect.offset.y = new_y;
+         map->dst_rect.extent.height = new_h;
+      }
+   }
+
+   *last_band_out =
+      (y0 + (int32_t)out->scissor.extent.height) >= (dst_y + (int32_t)dst_h);
+   return true;
 }
 
 static VkResult pvr_3d_copy_blit(struct pvr_transfer_ctx *ctx,
@@ -5734,6 +5838,35 @@ static VkResult pvr_3d_copy_blit(struct pvr_transfer_ctx *ctx,
                                     pass_idx,
                                     finished_out);
       }
+   }
+
+   /* Oversized copies truncate in hardware, so hand the core one band per
+    * pass and only report finished on the last one. Only applies when the
+    * texel-unwind machinery is not already driving the pass index.
+    */
+   if (state->custom_mapping.pass_count == 0U) {
+      struct pvr_transfer_cmd banded;
+      bool last_band;
+
+      if (pvr_transfer_band_cmd(active_cmd, pass_idx, &banded, &last_band)) {
+         VkResult band_result =
+            pvr_3d_copy_blit_core(ctx, &banded, prep_data, 0U, finished_out);
+
+         if (band_result == VK_SUCCESS)
+            *finished_out = last_band;
+
+         return band_result;
+      }
+   }
+
+   if (pvr_tq_force_clip() && active_cmd->source_count <= 1U &&
+       (active_cmd->flags & PVR_TRANSFER_CMD_FLAGS_FILL) == 0U) {
+      return pvr_reroute_to_clip(ctx,
+                                 active_cmd,
+                                 &active_cmd->scissor,
+                                 prep_data,
+                                 pass_idx,
+                                 finished_out);
    }
 
    return pvr_3d_copy_blit_core(ctx,

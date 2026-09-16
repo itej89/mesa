@@ -21,6 +21,7 @@
  * SOFTWARE.
  */
 
+#include <stdio.h>
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -153,6 +154,10 @@ static VkResult pvr_srv_heap_init(
                                      &size,
                                      &carveout_size,
                                      &log2_page_size);
+   /* the locals, not srv_heap->base -- that is not filled until
+    * pvr_winsys_heap_init() below, so printing it here always showed
+    * zeros and made perfectly good heaps look broken. */
+   fprintf(stderr, "PVRPORT heap: details(idx=%u) -> %d base=0x%llx size=0x%llx\n", heap_idx, (int)result, (unsigned long long)base_address.addr, (unsigned long long)size);
    if (result != VK_SUCCESS)
       return result;
 
@@ -178,8 +183,12 @@ static VkResult pvr_srv_heap_init(
                                     srv_heap->base.base_addr,
                                     srv_heap->base.size,
                                     srv_heap->base.log2_page_size,
+                                    /* PVRPORT: the same index already used for
+                                     * pvr_srv_get_heap_details() above. */
+                                    heap_idx,
                                     srv_ws->server_memctx,
                                     &srv_heap->server_heap);
+   fprintf(stderr, "PVRPORT heap: int_heap_create(idx=%u) -> %d\n", heap_idx, (int)result);
    if (result != VK_SUCCESS) {
       pvr_winsys_helper_winsys_heap_finish(&srv_heap->base);
       return result;
@@ -227,6 +236,7 @@ static VkResult pvr_srv_memctx_init(struct pvr_srv_winsys *srv_ws)
    result = pvr_srv_int_ctx_create(srv_ws->base.render_fd,
                                    &srv_ws->server_memctx,
                                    &srv_ws->server_memctx_data);
+   fprintf(stderr, "PVRPORT mem: int_ctx_create -> %d\n", (int)result);
    if (result != VK_SUCCESS)
       return result;
 
@@ -234,6 +244,7 @@ static VkResult pvr_srv_memctx_init(struct pvr_srv_winsys *srv_ws)
    srv_ws->base.log2_page_size = util_logbase2(srv_ws->base.page_size);
 
    result = pvr_srv_get_heap_count(srv_ws->base.render_fd, &heap_count);
+   fprintf(stderr, "PVRPORT mem: heap_count -> %d n=%u\n", (int)result, heap_count);
    if (result != VK_SUCCESS)
       goto err_pvr_srv_int_ctx_destroy;
 
@@ -248,6 +259,7 @@ static VkResult pvr_srv_memctx_init(struct pvr_srv_winsys *srv_ws)
                                         NULL,
                                         NULL,
                                         NULL);
+      fprintf(stderr, "PVRPORT mem: heap_details[%u] -> %d %s\n", i, (int)result, heap_name);
       if (result != VK_SUCCESS)
          goto err_pvr_srv_int_ctx_destroy;
 
@@ -350,6 +362,7 @@ static VkResult pvr_srv_memctx_init(struct pvr_srv_winsys *srv_ws)
                                                &srv_ws->general_vma,
                                                &srv_ws->pds_vma,
                                                &srv_ws->usc_vma);
+   fprintf(stderr, "PVRPORT static: allocate_static_memory -> %d\n", (int)result);
    if (result != VK_SUCCESS)
       goto err_pvr_srv_heap_finish_rgn_hdr;
 
@@ -357,6 +370,7 @@ static VkResult pvr_srv_memctx_init(struct pvr_srv_winsys *srv_ws)
                                                  srv_ws->general_vma,
                                                  srv_ws->pds_vma,
                                                  srv_ws->usc_vma);
+   fprintf(stderr, "PVRPORT static: fill_static_memory -> %d\n", (int)result);
    if (result != VK_SUCCESS)
       goto err_pvr_srv_free_static_memory;
 
@@ -717,14 +731,21 @@ VkResult pvr_srv_winsys_create(const int render_fd,
    VkResult result;
    uint64_t bvnc;
 
-   if (!pvr_is_driver_compatible(render_fd))
-      return VK_ERROR_INCOMPATIBLE_DRIVER;
+   {
+      bool compat = pvr_is_driver_compatible(render_fd);
+      fprintf(stderr, "PVRPORT srv: driver_compatible=%d\n", (int)compat);
+      if (!compat)
+         return VK_ERROR_INCOMPATIBLE_DRIVER;
+   }
 
    result = pvr_srv_init_module(render_fd, PVR_SRVKM_MODULE_TYPE_SERVICES);
+   fprintf(stderr, "PVRPORT srv: init_module -> %d\n", (int)result);
    if (result != VK_SUCCESS)
       goto err_out;
 
    result = pvr_srv_connection_create(render_fd, &bvnc);
+   fprintf(stderr, "PVRPORT srv: connection_create -> %d bvnc=0x%llx\n",
+           (int)result, (unsigned long long)bvnc);
    if (result != VK_SUCCESS)
       goto err_out;
 
@@ -736,6 +757,7 @@ VkResult pvr_srv_winsys_create(const int render_fd,
    }
 
    int ret = pvr_device_info_init(&srv_ws->dev_info, bvnc);
+   fprintf(stderr, "PVRPORT srv: device_info_init -> %d\n", ret);
    if (ret) {
       return vk_errorf(NULL,
                        VK_ERROR_INCOMPATIBLE_DRIVER,
@@ -770,10 +792,12 @@ VkResult pvr_srv_winsys_create(const int render_fd,
    srv_ws->base.features.supports_threaded_submit = false;
 
    result = pvr_srv_memctx_init(srv_ws);
+   fprintf(stderr, "PVRPORT srv: memctx_init -> %d\n", (int)result);
    if (result != VK_SUCCESS)
       goto err_vk_free_srv_ws;
 
    result = pvr_srv_sync_prim_block_init(srv_ws);
+   fprintf(stderr, "PVRPORT srv: sync_prim_block_init -> %d\n", (int)result);
    if (result != VK_SUCCESS)
       goto err_pvr_srv_memctx_finish;
 

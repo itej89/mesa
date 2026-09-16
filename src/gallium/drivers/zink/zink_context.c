@@ -1,3 +1,4 @@
+#include <stdlib.h>
 /*
  * Copyright 2018 Collabora Ltd.
  *
@@ -3578,6 +3579,26 @@ zink_batch_no_rp_safe(struct zink_context *ctx)
    ctx->rp_draw = false;
 }
 
+
+/* Tiles of render output allowed in one batch before flushing; see
+ * zink-render-batch-budget.py. 0 disables. */
+static uint32_t
+zink_render_tile_budget(void)
+{
+   static int v = -1;
+
+   if (v < 0) {
+      const char *e = getenv("ZINK_RENDER_TILE_BUDGET");
+
+      v = e ? atoi(e) : 2048;
+      if (v < 0)
+         v = 0;
+   }
+
+   return (uint32_t)v;
+}
+
+
 void
 zink_batch_no_rp(struct zink_context *ctx)
 {
@@ -3586,6 +3607,20 @@ zink_batch_no_rp(struct zink_context *ctx)
    if (ctx->track_renderpasses && !ctx->blitting)
       tc_renderpass_info_reset(&ctx->dynamic_fb.tc_info);
    zink_batch_no_rp_safe(ctx);
+
+   /* This GPU completes only a bounded amount of rendering per submit and
+    * silently drops the rest, so charge each finished render pass against a
+    * budget and end the batch before reaching it. */
+   if (zink_render_tile_budget() && !ctx->blitting) {
+      uint32_t tiles = (DIV_ROUND_UP(ctx->fb_state.width, 16u) *
+                        DIV_ROUND_UP(ctx->fb_state.height, 16u));
+
+      ctx->render_tiles_this_batch += tiles;
+      if (ctx->render_tiles_this_batch >= zink_render_tile_budget()) {
+         ctx->render_tiles_this_batch = 0;
+         zink_flush_queue(ctx);
+      }
+   }
 }
 
 static void
@@ -5179,6 +5214,17 @@ zink_image_copy_buffer(struct pipe_context *pctx,
                           buffer_offset, stride, layer_stride, level, box, 0);
 }
 
+
+/* Route image copies through a draw; see zink-force-shader-copy.py. */
+static bool
+zink_force_shader_copy(void)
+{
+   static int v = -1;
+   if (v < 0)
+      v = getenv("ZINK_FORCE_SHADER_COPY") ? 1 : 0;
+   return v == 1;
+}
+
 static void
 zink_resource_copy_region(struct pipe_context *pctx,
                           struct pipe_resource *pdst,
@@ -5193,6 +5239,39 @@ zink_resource_copy_region(struct pipe_context *pctx,
       src = src->transient;
    if (dst->unflushed_transient && src != dst->transient)
       dst = dst->transient;
+
+   /* vkCmdCopyImage lands on the transfer queue, which truncates large copies
+    * on this GPU. Re-express a plain colour image copy as a blit so it goes
+    * through the draw path instead. */
+   if (zink_force_shader_copy() &&
+       pdst->target != PIPE_BUFFER && psrc->target != PIPE_BUFFER &&
+       psrc->nr_samples <= 1 && pdst->nr_samples <= 1 &&
+       !util_format_is_depth_or_stencil(psrc->format) &&
+       !util_format_is_depth_or_stencil(pdst->format)) {
+      struct pipe_blit_info blit = { 0 };
+
+      blit.src.resource = psrc;
+      blit.src.level = src_level;
+      blit.src.format = psrc->format;
+      blit.src.box = *src_box;
+
+      blit.dst.resource = pdst;
+      blit.dst.level = dst_level;
+      blit.dst.format = pdst->format;
+      blit.dst.box.x = dstx;
+      blit.dst.box.y = dsty;
+      blit.dst.box.z = dstz;
+      blit.dst.box.width = src_box->width;
+      blit.dst.box.height = src_box->height;
+      blit.dst.box.depth = src_box->depth;
+
+      blit.mask = PIPE_MASK_RGBA;
+      blit.filter = PIPE_TEX_FILTER_NEAREST;
+
+      pctx->blit(pctx, &blit);
+      return;
+   }
+
    if (dst->base.b.target != PIPE_BUFFER && src->base.b.target != PIPE_BUFFER) {
       VkImageCopy region;
       /* fill struct holes */

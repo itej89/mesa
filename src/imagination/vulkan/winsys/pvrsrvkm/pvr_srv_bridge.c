@@ -1,3 +1,15 @@
+#include <stdlib.h>
+static int pvr_dbg_on(void)
+{
+   static int v = -1;
+   if (v < 0)
+      v = getenv("PVR_BRIDGE_DEBUG") ? 1 : 0;
+   return v;
+}
+#include <stdio.h>
+#include <errno.h>
+#include <string.h>
+#define BRDBG(...) do { if (pvr_srv_trace_on()) if (pvr_srv_debug_on()) fprintf(stderr, "BRDBG " __VA_ARGS__); } while (0)
 /*
  * Copyright © 2022 Imagination Technologies Ltd.
  *
@@ -37,6 +49,68 @@
 #include "util/log.h"
 #include "util/macros.h"
 #include "vk_log.h"
+#include <stdlib.h>
+
+/* Bring-up tracing, off unless PVR_BRIDGE_DEBUG is set: these fire on every
+ * bridge ioctl and are far too expensive to leave on under a compositor. */
+static inline int pvr_srv_debug_on(void)
+{
+   static int v = -1;
+   if (v < 0)
+      v = getenv("PVR_BRIDGE_DEBUG") ? 1 : 0;
+   return v;
+}
+
+/* Bring-up tracing. These fire on every bridge ioctl; a compositor makes
+ * thousands a second and each line goes to the journal, so they must be off
+ * unless explicitly requested. Measured cost when on: ~4x on pco_render. */
+static inline int pvr_srv_trace_on(void)
+{
+   static int v = -1;
+   if (v < 0)
+      v = getenv("PVR_BRIDGE_DEBUG") ? 1 : 0;
+   return v;
+}
+static uint32_t _pmr_chunks_override(uint32_t n)
+{
+   const char *e = getenv("PVR_PMR_CHUNKS");
+   return e ? (uint32_t)strtoul(e, NULL, 0) : n;
+}
+
+static uint64_t _pmr_flags_override(uint64_t f)
+{
+   const char *e = getenv("PVR_PMR_FLAGS");
+   return e ? (uint64_t)strtoull(e, NULL, 0) : f;
+}
+
+static unsigned _reserve_id(void)
+{
+   const char *e = getenv("PVR_RESERVE_ID");
+   return e ? (unsigned)strtoul(e, NULL, 0)
+            : (unsigned)PVR_SRV_BRIDGE_MM_DEVMEMINTRESERVERANGE;
+}
+
+static unsigned _map_pmr_id(void)
+{
+   const char *e = getenv("PVR_MAPPMR_ID");
+   return e ? (unsigned)strtoul(e, NULL, 0)
+            : (unsigned)PVR_SRV_BRIDGE_MM_DEVMEMINTMAPPMR;
+}
+
+static unsigned _pmr_alloc_id(void)
+{
+   const char *e = getenv("PVR_PMR_ALLOC_ID");
+   return e ? (unsigned)strtoul(e, NULL, 0)
+            : (unsigned)PVR_SRV_BRIDGE_MM_PHYSMEMNEWRAMBACKEDLOCKEDPMR;
+}
+
+static unsigned _heapcount_id(void)
+{
+   const char *e = getenv("PVR_HEAPCOUNT_ID");
+   return e ? (unsigned)strtoul(e, NULL, 0)
+            : (unsigned)PVR_SRV_BRIDGE_MM_HEAPCFGHEAPCOUNT;
+}
+
 
 #define vk_bridge_err(vk_err, bridge_func, bridge_ret)  \
    vk_errorf(NULL,                                      \
@@ -54,6 +128,8 @@ static int pvr_srv_bridge_call(int fd,
                                void *output,
                                uint32_t output_buffer_size)
 {
+   static unsigned _seq;
+   unsigned _myseq = ++_seq;
    struct drm_srvkm_cmd cmd = {
       .bridge_id = bridge_id,
       .bridge_func_id = function_id,
@@ -69,7 +145,17 @@ static int pvr_srv_bridge_call(int fd,
 
    VG(VALGRIND_MAKE_MEM_DEFINED(output, output_buffer_size));
 
-   return 0U;
+   do { int _r = (0U);
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "BRIDGESEQ #%u grp=%u fn=%u in=%u out=%u -> %d%s\n",
+               _myseq, (unsigned)bridge_id, (unsigned)function_id,
+               (unsigned)input_buffer_size, (unsigned)output_buffer_size,
+               _r, _r ? "  <== IOCTL FAIL" : "");
+            }
+         }
+      return _r; } while (0);
 }
 
 VkResult pvr_srv_init_module(int fd, enum pvr_srvkm_module_type module)
@@ -354,7 +440,7 @@ VkResult pvr_srv_get_heap_count(int fd, uint32_t *const heap_count_out)
 
    result = pvr_srv_bridge_call(fd,
                                 PVR_SRV_BRIDGE_MM,
-                                PVR_SRV_BRIDGE_MM_HEAPCFGHEAPCOUNT,
+                                _heapcount_id(),
                                 &cmd,
                                 sizeof(cmd),
                                 &ret,
@@ -374,15 +460,18 @@ VkResult pvr_srv_int_heap_create(int fd,
                                  pvr_dev_addr_t base_address,
                                  uint64_t size,
                                  uint32_t log2_page_size,
+                                 uint32_t heap_index,
                                  void *server_memctx,
                                  void **const server_heap_out)
 {
    struct pvr_srv_devmem_int_heap_create_cmd cmd = {
       .server_memctx = server_memctx,
-      .base_addr = base_address,
-      .size = size,
+      .heap_config_index = 0,
+      .heap_index = heap_index,
       .log2_page_size = log2_page_size,
    };
+   (void)base_address;
+   (void)size;
 
    struct pvr_srv_devmem_int_heap_create_ret ret = {
       .error = PVR_SRV_ERROR_BRIDGE_CALL_FAILED,
@@ -390,6 +479,29 @@ VkResult pvr_srv_int_heap_create(int fd,
 
    int result;
 
+   {
+      const unsigned char *_b = (const unsigned char *)&cmd;
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "HEAPCMDDUMP cmd[%zu] =", sizeof(cmd));
+            }
+         }
+      for (unsigned _i = 0; _i < sizeof(cmd); _i++)
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, " %02x", _b[_i]);
+            }
+         }
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "\n  base=0x%llx size=0x%llx memctx=%p log2ps=%u\n",
+                    (unsigned long long)base_address.addr, (unsigned long long)size,
+                    server_memctx, log2_page_size);
+            }
+         }
+   }
    result = pvr_srv_bridge_call(fd,
                                 PVR_SRV_BRIDGE_MM,
                                 PVR_SRV_BRIDGE_MM_DEVMEMINTHEAPCREATE,
@@ -397,6 +509,28 @@ VkResult pvr_srv_int_heap_create(int fd,
                                 sizeof(cmd),
                                 &ret,
                                 sizeof(ret));
+   {
+      const unsigned char *_b = (const unsigned char *)&ret;
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "HEAPRETDUMP ioctl=%d ret[%zu] =", result, sizeof(ret));
+            }
+         }
+      for (unsigned _i = 0; _i < sizeof(ret); _i++)
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, " %02x", _b[_i]);
+            }
+         }
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "  (server_heap=%p error=%u)\n",
+                    ret.server_heap, (unsigned)ret.error);
+            }
+         }
+   }
    if (result || ret.error != PVR_SRV_OK) {
       return vk_bridge_err(VK_ERROR_INITIALIZATION_FAILED,
                            "PVR_SRV_BRIDGE_MM_DEVMEMINTHEAPCREATE",
@@ -538,6 +672,42 @@ VkResult pvr_srv_int_ctx_create(int fd,
                                 sizeof(cmd),
                                 &ret,
                                 sizeof(ret));
+   {
+      const unsigned char *_b = (const unsigned char *)&ret;
+      char _l[128]; unsigned _o = 0;
+      for (unsigned _i = 0; _i < sizeof(ret) && _o < sizeof(_l) - 4; _i++)
+         _o += sprintf(_l + _o, "%02x ", _b[_i]);
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "RAWDUMP ret[%zu] = %s\n", sizeof(ret), _l);
+            }
+         }
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "RAWDUMP as u32: ");
+            }
+         }
+      for (unsigned _i = 0; _i + 4 <= sizeof(ret); _i += 4)
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "%08x ", *(const unsigned int *)(_b + _i));
+            }
+         }
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "\n");
+            }
+         }
+   }
+   BRDBG("DEVMEMINTCTXCREATE: ioctl_result=%d errno=%d(%s) srv_error=%u "
+         "group=%u func=%u cmd_sz=%zu ret_sz=%zu\n",
+         result, errno, strerror(errno), (unsigned)ret.error,
+         (unsigned)PVR_SRV_BRIDGE_MM,
+         (unsigned)PVR_SRV_BRIDGE_MM_DEVMEMINTCTXCREATE,
+         sizeof(cmd), sizeof(ret));
    if (result || ret.error != PVR_SRV_OK) {
       return vk_bridge_err(VK_ERROR_INITIALIZATION_FAILED,
                            "PVR_SRV_BRIDGE_MM_DEVMEMINTCTXCREATE",
@@ -556,6 +726,10 @@ VkResult pvr_srv_int_reserve_addr(int fd,
                                   uint64_t size,
                                   void **const reservation_out)
 {
+   /* RSVPOISON: optionally corrupt the heap handle to force the kernel to
+    * name the function it dispatched. */
+   if (getenv("PVR_RSV_POISON"))
+      server_heap = (void *)(uintptr_t)0xdeadbe;
    struct pvr_srv_devmem_int_reserve_range_cmd cmd = {
       .server_heap = server_heap,
       .addr = addr,
@@ -570,11 +744,33 @@ VkResult pvr_srv_int_reserve_addr(int fd,
 
    result = pvr_srv_bridge_call(fd,
                                 PVR_SRV_BRIDGE_MM,
-                                PVR_SRV_BRIDGE_MM_DEVMEMINTRESERVERANGE,
+                                _reserve_id(),
                                 &cmd,
                                 sizeof(cmd),
                                 &ret,
                                 sizeof(ret));
+   {
+      const unsigned char *_b = (const unsigned char *)&ret;
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "RSVRETDUMP ret[%zu] =", sizeof(ret));
+            }
+         }
+      for (unsigned _i = 0; _i < sizeof(ret); _i++)
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, " %02x", _b[_i]);
+            }
+         }
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "  (reservation=%p error=%u)\n",
+                    ret.reservation, (unsigned)ret.error);
+            }
+         }
+   }
    if (result || ret.error != PVR_SRV_OK) {
       return vk_bridge_err(VK_ERROR_INITIALIZATION_FAILED,
                            "PVR_SRV_BRIDGE_MM_DEVMEMINTRESERVERANGE",
@@ -629,31 +825,104 @@ VkResult pvr_srv_alloc_pmr(int fd,
 
    struct pvr_srv_physmem_new_ram_backed_locked_pmr_cmd cmd = {
       .size = size,
-      .block_size = block_size,
-      .phy_blocks = phy_blocks,
-      .virt_blocks = virt_blocks,
+      .phy_blocks = _pmr_chunks_override(phy_blocks),
+      .virt_blocks = _pmr_chunks_override(virt_blocks),
       .mapping_table = &mapping_table,
       .log2_page_size = log2_page_size,
-      .flags = flags,
+      .flags = _pmr_flags_override(flags),
       .annotation_size = annotation_size,
       .annotation = annotation,
       .pid = pid,
       .pdump_flags = 0x00000000U,
    };
 
+   {
+      const unsigned char *_b = (const unsigned char *)&cmd;
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "PMRCMDDUMP cmd[%zu] =", sizeof(cmd));
+            }
+         }
+      for (unsigned _i = 0; _i < sizeof(cmd); _i++)
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "%s%02x", (_i % 8 == 0 ? " | " : " "), _b[_i]);
+            }
+         }
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "\n  size=%llu phy=%u virt=%u log2ps=%u flags=0x%llx "
+                    "annsz=%u pid=%u\n",
+                    (unsigned long long)size, phy_blocks, virt_blocks,
+                    log2_page_size, (unsigned long long)flags, annotation_size, pid);
+            }
+         }
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "  offset24 u32 = %u\n",
+                    *(const unsigned int *)(_b + 24));
+            }
+         }
+   }
    struct pvr_srv_physmem_new_ram_backed_locked_pmr_ret ret = {
       .error = PVR_SRV_ERROR_BRIDGE_CALL_FAILED,
    };
 
    int result;
 
+   /* INLINEMARSHAL: optionally append the arrays after the struct. */
+   unsigned char _inl[256];
+   const void *_inptr = &cmd;
+   uint32_t _insize = sizeof(cmd);
+   if (getenv("PVR_INLINE_ARRAYS")) {
+      uint32_t _mt_bytes = 4u * (cmd.virt_blocks ? cmd.virt_blocks : 1u);
+      uint32_t _an = cmd.annotation_size;
+      if (sizeof(cmd) + _mt_bytes + _an <= sizeof(_inl)) {
+         memcpy(_inl, &cmd, sizeof(cmd));
+         memset(_inl + sizeof(cmd), 0, _mt_bytes);
+         memcpy(_inl + sizeof(cmd) + _mt_bytes, annotation, _an);
+         _inptr = _inl;
+         _insize = sizeof(cmd) + _mt_bytes + _an;
+if (pvr_srv_trace_on())
+            if (pvr_dbg_on()) {
+               if (pvr_dbg_on()) {
+                  if (pvr_srv_debug_on()) fprintf(stderr, "INLINEMARSHAL in_size %zu -> %u (mt=%u ann=%u)\n",
+                       sizeof(cmd), _insize, _mt_bytes, _an);
+               }
+            }
+      }
+   }
    result = pvr_srv_bridge_call(fd,
                                 PVR_SRV_BRIDGE_MM,
-                                PVR_SRV_BRIDGE_MM_PHYSMEMNEWRAMBACKEDLOCKEDPMR,
-                                &cmd,
-                                sizeof(cmd),
+                                _pmr_alloc_id(),
+                                (void *)_inptr,
+                                _insize,
                                 &ret,
                                 sizeof(ret));
+   {
+      const unsigned char *_b = (const unsigned char *)&ret;
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "PMRRETDUMP ioctl=%d ret[%zu] =", result, sizeof(ret));
+            }
+         }
+      for (unsigned _i = 0; _i < sizeof(ret); _i++)
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, " %02x", _b[_i]);
+            }
+         }
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "  (pmr=%p error=%u)\n", ret.pmr, (unsigned)ret.error);
+            }
+         }
+   }
    if (result || ret.error != PVR_SRV_OK) {
       return vk_bridge_err(VK_ERROR_MEMORY_MAP_FAILED,
                            "PVR_SRV_BRIDGE_MM_PHYSMEMNEWRAMBACKEDLOCKEDPMR",
@@ -721,6 +990,40 @@ VkResult pvr_srv_int_map_pages(int fd,
                                 sizeof(cmd),
                                 &ret,
                                 sizeof(ret));
+   {
+      const unsigned char *_c = (const unsigned char *)&cmd;
+      const unsigned char *_r = (const unsigned char *)&ret;
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "MAPPAGESDUMP cmd[%zu] =", sizeof(cmd));
+            }
+         }
+      for (unsigned _i = 0; _i < sizeof(cmd); _i++)
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "%s%02x", (_i % 8 == 0 ? " | " : " "), _c[_i]);
+            }
+         }
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "\n  ret[%zu] =", sizeof(ret));
+            }
+         }
+      for (unsigned _i = 0; _i < sizeof(ret); _i++)
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, " %02x", _r[_i]);
+            }
+         }
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "  ioctl=%d error=%u\n", result, (unsigned)ret.error);
+            }
+         }
+   }
    if (result || ret.error != PVR_SRV_OK) {
       return vk_bridge_err(VK_ERROR_MEMORY_MAP_FAILED,
                            "PVR_SRV_BRIDGE_MM_DEVMEMINTMAPPAGES",
@@ -783,11 +1086,12 @@ VkResult pvr_srv_int_map_pmr(int fd,
 
    result = pvr_srv_bridge_call(fd,
                                 PVR_SRV_BRIDGE_MM,
-                                PVR_SRV_BRIDGE_MM_DEVMEMINTMAPPMR,
+                                _map_pmr_id(),
                                 &cmd,
                                 sizeof(cmd),
                                 &ret,
                                 sizeof(ret));
+   fprintf(stderr, "PVRPORT map: ioctl=%d bridge_err=%d\n", result, (int)ret.error);
    if (result || ret.error != PVR_SRV_OK) {
       return vk_bridge_err(VK_ERROR_MEMORY_MAP_FAILED,
                            "PVR_SRV_BRIDGE_MM_DEVMEMINTMAPPMR",
@@ -930,6 +1234,40 @@ VkResult pvr_srv_rgx_create_transfer_context(int fd,
                                 sizeof(cmd),
                                 &ret,
                                 sizeof(ret));
+   {
+      const unsigned char *_c = (const unsigned char *)&cmd;
+      const unsigned char *_r = (const unsigned char *)&ret;
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "TQCTXDUMP ioctl=%d cmd[%zu] =", result, sizeof(cmd));
+            }
+         }
+      for (unsigned _i = 0; _i < sizeof(cmd); _i++)
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "%s%02x", (_i % 8 == 0 ? " | " : " "), _c[_i]);
+            }
+         }
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "\n  ret[%zu] =", sizeof(ret));
+            }
+         }
+      for (unsigned _i = 0; _i < sizeof(ret); _i++)
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "%s%02x", (_i % 8 == 0 ? " | " : " "), _r[_i]);
+            }
+         }
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "\n");
+            }
+         }
+   }
    if (result || ret.error != PVR_SRV_OK) {
       return vk_bridge_err(VK_ERROR_INITIALIZATION_FAILED,
                            "PVR_SRV_BRIDGE_RGXTQ_RGXCREATETRANSFERCONTEXT",
@@ -1008,7 +1346,7 @@ VkResult pvr_srv_rgx_submit_transfer2(int fd,
       .update_ufo_sync_prim_block = update_ufo_sync_prim_block,
       .update_timeline_2d = update_timeline_2d,
       .update_timeline_3d = update_timeline_3d,
-      .check_fence = check_fence,
+      .check_fence = -1,
       .ext_job_ref = ext_job_ref,
       .prepare_count = prepare_count,
       .sync_pmr_count = sync_pmr_count,
@@ -1032,6 +1370,12 @@ VkResult pvr_srv_rgx_submit_transfer2(int fd,
       if (result == PVR_SRV_ERROR_RETRY || ret.error == PVR_SRV_ERROR_RETRY)
          return VK_NOT_READY;
 
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "CARVEOUTBR site1 fired\n");
+            }
+         }
       return vk_bridge_err(VK_ERROR_OUT_OF_DEVICE_MEMORY,
                            "PVR_SRV_BRIDGE_RGXTQ_RGXSUBMITTRANSFER2",
                            ret);
@@ -1086,6 +1430,40 @@ pvr_srv_rgx_create_compute_context(int fd,
                                 sizeof(cmd),
                                 &ret,
                                 sizeof(ret));
+   {
+      const unsigned char *_c = (const unsigned char *)&cmd;
+      const unsigned char *_r = (const unsigned char *)&ret;
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "CMPCTXDUMP ioctl=%d cmd[%zu] =", result, sizeof(cmd));
+            }
+         }
+      for (unsigned _i = 0; _i < sizeof(cmd); _i++)
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "%s%02x", (_i % 8 == 0 ? " | " : " "), _c[_i]);
+            }
+         }
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "\n  ret[%zu] =", sizeof(ret));
+            }
+         }
+      for (unsigned _i = 0; _i < sizeof(ret); _i++)
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "%s%02x", (_i % 8 == 0 ? " | " : " "), _r[_i]);
+            }
+         }
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "\n");
+            }
+         }
+   }
    if (result || ret.error != PVR_SRV_OK) {
       return vk_bridge_err(VK_ERROR_INITIALIZATION_FAILED,
                            "PVR_SRV_BRIDGE_RGXCMP_RGXCREATECOMPUTECONTEXT",
@@ -1154,7 +1532,7 @@ VkResult pvr_srv_rgx_kick_compute2(int fd,
       .update_fence_name = update_fence_name,
       .client_update_ufo_sync_prim_block = client_update_ufo_sync_prim_block,
       .sync_pmrs = sync_pmrs,
-      .check_fence = check_fence,
+      .check_fence = -1,
       .update_timeline = update_timeline,
       .client_update_count = client_update_count,
       .cmd_size = cmd_size,
@@ -1183,6 +1561,12 @@ VkResult pvr_srv_rgx_kick_compute2(int fd,
       if (result == PVR_SRV_ERROR_RETRY || ret.error == PVR_SRV_ERROR_RETRY)
          return VK_NOT_READY;
 
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "CARVEOUTBR site2 fired\n");
+            }
+         }
       return vk_bridge_err(VK_ERROR_OUT_OF_DEVICE_MEMORY,
                            "PVR_SRV_BRIDGE_RGXCMP_RGXKICKCDM2",
                            ret);
@@ -1348,6 +1732,27 @@ VkResult pvr_srv_rgx_create_free_list(int fd,
                                 sizeof(cmd),
                                 &ret,
                                 sizeof(ret));
+   {
+      const unsigned char *_r = (const unsigned char *)&ret;
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "FLDUMP ioctl=%d ret[%zu] =", result, sizeof(ret));
+            }
+         }
+      for (unsigned _i = 0; _i < sizeof(ret); _i++)
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, " %02x", _r[_i]);
+            }
+         }
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "  (cookie=%p error=%u)\n", ret.cleanup_cookie, (unsigned)ret.error);
+            }
+         }
+   }
    if (result || ret.error != PVR_SRV_OK) {
       return vk_bridge_err(VK_ERROR_INITIALIZATION_FAILED,
                            "PVR_SRV_BRIDGE_RGXTA3D_RGXCREATEFREELIST",
@@ -1439,6 +1844,40 @@ pvr_srv_rgx_create_render_context(int fd,
                                 sizeof(cmd),
                                 &ret,
                                 sizeof(ret));
+   {
+      const unsigned char *_c = (const unsigned char *)&cmd;
+      const unsigned char *_r = (const unsigned char *)&ret;
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "RCCTXDUMP ioctl=%d cmd[%zu] =", result, sizeof(cmd));
+            }
+         }
+      for (unsigned _i = 0; _i < sizeof(cmd); _i++)
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "%s%02x", (_i % 8 == 0 ? " | " : " "), _c[_i]);
+            }
+         }
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "\n  ret[%zu] =", sizeof(ret));
+            }
+         }
+      for (unsigned _i = 0; _i < sizeof(ret); _i++)
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, " %02x", _r[_i]);
+            }
+         }
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "\n");
+            }
+         }
+   }
    if (result || ret.error != PVR_SRV_OK) {
       return vk_bridge_err(VK_ERROR_INITIALIZATION_FAILED,
                            "PVR_SRV_BRIDGE_RGXTA3D_RGXCREATERENDERCONTEXT",
@@ -1548,10 +1987,10 @@ VkResult pvr_srv_rgx_kick_render2(int fd,
       .client_ta_fence_sync_prim_block = client_geom_fence_sync_prim_block,
       .client_ta_update_sync_prim_block = client_geom_update_sync_prim_block,
       .sync_pmrs = sync_pmrs,
-      .abort = abort,
-      .kick_3d = kick_frag,
-      .kick_pr = kick_pr,
-      .kick_ta = kick_geom,
+      .abort = abort ? 1 : 0,
+      .kick_3d = kick_frag ? 1 : 0,
+      .kick_pr = kick_pr ? 1 : 0,
+      .kick_ta = kick_geom ? 1 : 0,
       .check_fence = check_fence,
       .check_fence_3d = check_fence_frag,
       .update_timeline = update_timeline,
@@ -1581,6 +2020,69 @@ VkResult pvr_srv_rgx_kick_render2(int fd,
 
    int result;
 
+   {
+      /* The kernel resolved a fence fd of 0; dump the request so the offset it
+       * actually reads can be found rather than guessed. */
+      const unsigned char *_c = (const unsigned char *)&cmd;
+      const char *_poke = getenv("PVR_KICK_POKE_OFF");
+      if (_poke) {
+         /* Write -1 at a chosen offset to find which field the kernel actually
+          * reads as the check fence - it resolved fd 0, not our -1 at 212. */
+         const char *_p = _poke;
+         while (*_p) {
+            long _o = strtol(_p, (char **)&_p, 0);
+            if (_o >= 0 && _o + 4 <= (long)sizeof(cmd)) {
+               int32_t _v = -1;
+               memcpy((unsigned char *)&cmd + _o, &_v, 4);
+if (pvr_srv_trace_on())
+                  if (pvr_dbg_on()) {
+                     if (pvr_dbg_on()) {
+                        if (pvr_srv_debug_on()) fprintf(stderr, "KICKPOKE wrote -1 at offset %ld\n", _o);
+                     }
+                  }
+            }
+            while (*_p == ',' || *_p == ' ') _p++;
+         }
+      }
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "KICKCMDDUMP size=%zu\n", sizeof(cmd));
+            }
+         }
+      for (unsigned _i = 0; _i < sizeof(cmd); _i += 16) {
+if (pvr_srv_trace_on())
+            if (pvr_dbg_on()) {
+               if (pvr_dbg_on()) {
+                  if (pvr_srv_debug_on()) fprintf(stderr, "  %3u:", _i);
+               }
+            }
+         for (unsigned _j = 0; _j < 16 && _i + _j < sizeof(cmd); _j++)
+            if (pvr_dbg_on()) {
+               if (pvr_dbg_on()) {
+                  if (pvr_srv_debug_on()) fprintf(stderr, " %02x", _c[_i + _j]);
+               }
+            }
+if (pvr_srv_trace_on())
+            if (pvr_dbg_on()) {
+               if (pvr_dbg_on()) {
+                  if (pvr_srv_debug_on()) fprintf(stderr, "\n");
+               }
+            }
+      }
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "  check_fence=%d @%zu  check_fence_3d=%d @%zu  "
+                            "update_timeline=%d @%zu  update_timeline_3d=%d @%zu\n",
+                    cmd.check_fence, offsetof(struct pvr_srv_rgx_kick_ta3d2_cmd, check_fence),
+                    cmd.check_fence_3d, offsetof(struct pvr_srv_rgx_kick_ta3d2_cmd, check_fence_3d),
+                    cmd.update_timeline, offsetof(struct pvr_srv_rgx_kick_ta3d2_cmd, update_timeline),
+                    cmd.update_timeline_3d, offsetof(struct pvr_srv_rgx_kick_ta3d2_cmd, update_timeline_3d));
+            }
+         }
+   }
+
    result = pvr_srv_bridge_call(fd,
                                 PVR_SRV_BRIDGE_RGXTA3D,
                                 PVR_SRV_BRIDGE_RGXTA3D_RGXKICKTA3D2,
@@ -1588,11 +2090,39 @@ VkResult pvr_srv_rgx_kick_render2(int fd,
                                 sizeof(cmd),
                                 &ret,
                                 sizeof(ret));
+   {
+      const unsigned char *_r = (const unsigned char *)&ret;
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "KICKDUMP ioctl=%d ret[%zu] =", result, sizeof(ret));
+            }
+         }
+      for (unsigned _i = 0; _i < sizeof(ret); _i++)
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, " %02x", _r[_i]);
+            }
+         }
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "  (fence=%d fence3d=%d error=%u)\n",
+                    ret.update_fence, ret.update_fence_3d, (unsigned)ret.error);
+            }
+         }
+   }
    if (result || ret.error != PVR_SRV_OK) {
       /* There is no 'retry' VkResult, so treat it as VK_NOT_READY instead. */
       if (result == PVR_SRV_ERROR_RETRY || ret.error == PVR_SRV_ERROR_RETRY)
          return VK_NOT_READY;
 
+if (pvr_srv_trace_on())
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               if (pvr_srv_debug_on()) fprintf(stderr, "CARVEOUTBR site3 fired\n");
+            }
+         }
       return vk_bridge_err(VK_ERROR_OUT_OF_DEVICE_MEMORY,
                            "PVR_SRV_BRIDGE_RGXTA3D_RGXKICKTA3D2",
                            ret);

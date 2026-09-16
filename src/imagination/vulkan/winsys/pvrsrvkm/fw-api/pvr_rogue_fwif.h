@@ -155,29 +155,31 @@ struct rogue_fwif_ta_regs {
    uint64_t vdm_ctrl_stream_base;
    uint64_t tpu_border_colour_table;
 
-   /* Only used when feature VDM_DRAWINDIRECT present. */
-   uint64_t vdm_draw_indirect0;
-   /* Only used when feature VDM_DRAWINDIRECT present. */
-   uint32_t vdm_draw_indirect1;
+   /* DDK119_TA_LAYOUT: guarding feature/BRN absent on BXE-4-32, so this
+    * firmware's struct omits it. */
+   /* DDK119_TA_LAYOUT: guarding feature/BRN absent on BXE-4-32, so this
+    * firmware's struct omits it. */
 
    uint32_t ppp_ctrl;
    uint32_t te_psg;
-   /* Only used when BRN 49927 present. */
-   uint32_t tpu;
+   /* DDK119_TA_LAYOUT: guarding feature/BRN absent on BXE-4-32, so this
+    * firmware's struct omits it. */
 
    uint32_t vdm_context_resume_task0_size;
-   /* Only used when feature VDM_OBJECT_LEVEL_LLS present. */
-   uint32_t vdm_context_resume_task3_size;
+   /* DDK119_TA_LAYOUT: guarding feature/BRN absent on BXE-4-32, so this
+    * firmware's struct omits it. */
 
-   /* Only used when BRN 67381 present. */
-   uint32_t pds_ctrl;
+   /* DDK119_TA_LAYOUT: guarding feature/BRN absent on BXE-4-32, so this
+    * firmware's struct omits it. */
 
    uint32_t view_idx;
 
-   /* Only used when feature TESSELLATION present */
-   uint32_t pds_coeff_free_prog;
-
-   uint32_t padding;
+   /* DDK119_TA_LAYOUT: no trailing padding word in this firmware's struct.
+    * Byte-diffing the geometry command against the blob's Vulkan driver - same
+    * SPIR-V, same test - showed ours 8 bytes long, with `flags` landing at
+    * offset 56 where the blob puts it at 48. Two u64 plus four u32 is 32 bytes
+    * exactly, which is where the blob's `flags` sits; this word was the
+    * extra. */
 };
 
 /**
@@ -217,12 +219,9 @@ struct rogue_fwif_cmd_ta {
     */
    struct rogue_fwif_ufo partial_render_ta_3d_fence;
 
-   /* Only used when BRN 44455 or BRN 63027 present. */
-   alignas(8) struct rogue_fwif_dummy_rgnhdr_init_geom_regs
-      dummy_rgnhdr_init_geom_regs;
-
-   /* Only used when BRN 61484 or BRN 66333 present. */
-   uint32_t brn61484_66333_live_rt;
+   /* DDK119_TA_LAYOUT: BRNs 44455/63027 and 61484/66333 are all absent on
+    * BXE-4-32, so this firmware's geometry command carries neither of these
+    * members. */
 
    uint32_t padding;
 };
@@ -247,39 +246,51 @@ struct rogue_fwif_3d_regs {
     */
    uint32_t usc_pixel_output_ctrl;
 
-#define ROGUE_MAXIMUM_OUTPUT_REGISTERS_PER_PIXEL 8U
+/* DDK119_3D_LAYOUT: this firmware carries four clear registers, not eight.
+ * Byte-diffing the fragment command against the blob's Vulkan driver: between
+ * usc_pixel_output_ctrl and the background-depth float (1.0f) the blob has 16
+ * bytes where we had 32, which is exactly this array. */
+#define ROGUE_MAXIMUM_OUTPUT_REGISTERS_PER_PIXEL 4U
    uint32_t usc_clear_register[ROGUE_MAXIMUM_OUTPUT_REGISTERS_PER_PIXEL];
 
    uint32_t isp_bgobjdepth;
    uint32_t isp_bgobjvals;
    uint32_t isp_aa;
-   /* Only used when feature S7_TOP_INFRASTRUCTURE present. */
-   uint32_t isp_xtp_pipe_enable;
+   /* DDK119_3D_LAYOUT: dropped isp_xtp_pipe_enable - the guarding feature is absent on
+    * BXE-4-32, so this firmware's struct does not carry it. Emitting it
+    * anyway shifted every later field and the render produced nothing. */
 
    uint32_t isp_ctl;
 
-   /* Only used when feature CLUSTER_GROUPING present. */
-   uint32_t tpu;
+   /* DDK119_3D_LAYOUT: dropped tpu - the guarding feature is absent on
+    * BXE-4-32, so this firmware's struct does not carry it. Emitting it
+    * anyway shifted every later field and the render produced nothing. */
 
    uint32_t event_pixel_pds_info;
 
    uint32_t pixel_phantom;
 
-   uint32_t view_idx;
-
+   /* DDK119_3D_LAYOUT: this firmware orders these the other way round. The
+    * blob puts the PDS data address at offset 60 with view_idx zero at 64;
+    * ours had them swapped. */
    uint32_t event_pixel_pds_data;
 
-   /* Only used when BRN 65101 present. */
-   uint32_t brn65101_event_pixel_pds_data;
+   uint32_t view_idx;
+
+   /* DDK119_3D_LAYOUT: dropped brn65101_event_pixel_pds_data - the guarding feature is absent on
+    * BXE-4-32, so this firmware's struct does not carry it. Emitting it
+    * anyway shifted every later field and the render produced nothing. */
 
    /* Only used when feature GPU_MULTICORE_SUPPORT or BRN 47217 present. */
    uint32_t isp_oclqry_stride;
 
-   /* Only used when feature ZLS_SUBTILE present. */
-   uint32_t isp_zls_pixels;
+   /* DDK119_3D_LAYOUT: dropped isp_zls_pixels - the guarding feature is absent on
+    * BXE-4-32, so this firmware's struct does not carry it. Emitting it
+    * anyway shifted every later field and the render produced nothing. */
 
-   /* Only used when feature ISP_ZLS_D24_S8_PACKING_OGL_MODE present. */
-   uint32_t rgx_cr_blackpearl_fix;
+   /* DDK119_3D_LAYOUT: dropped rgx_cr_blackpearl_fix - the guarding feature is absent on
+    * BXE-4-32, so this firmware's struct does not carry it. Emitting it
+    * anyway shifted every later field and the render produced nothing. */
 
    /* All values below the alignas(8) must be 64 bit. */
    alignas(8) uint64_t isp_scissor_base;
@@ -289,33 +300,33 @@ struct rogue_fwif_3d_regs {
    uint64_t isp_zload_store_base;
    uint64_t isp_stencil_load_store_base;
 
-   /*
-    * Only used when feature FBCDC_ALGORITHM present and value < 3 or feature
-    * FB_CDC_V4 present. Additionally, BRNs 48754, 60227, 72310 and 72311 must
-    * not be present.
-    */
-   uint64_t fb_cdc_zls;
+   /* DDK119_3D_LAYOUT: dropped. Its guard (FBCDC_ALGORITHM < 3, or FB_CDC_V4)
+    * does not hold on BXE-4-32, which reports fbcdc_algorithm = 50, and this
+    * firmware's struct leaves it out. It was the last 8 bytes of drift between
+    * our fragment command and the blob's. */
 
 #define ROGUE_PBE_WORDS_REQUIRED_FOR_RENDERS 3U
-   uint64_t pbe_word[8U][ROGUE_PBE_WORDS_REQUIRED_FOR_RENDERS];
+   /* DDK119_3D_LAYOUT: eight render targets at TWO words each - 128 bytes -
+    * not eight at three. Measured, not guessed: pbe_word starts at 120 in both
+    * (verified aligned), and the blob puts tpu_border_colour_table at 248. */
+#define PVR_SRV_PBE_WORDS_PER_RENDER 2U
+   uint64_t pbe_word[8U][PVR_SRV_PBE_WORDS_PER_RENDER];
    uint64_t tpu_border_colour_table;
    uint64_t pds_bgnd[3U];
 
-   /* Only used when BRN 65101 present. */
-   uint64_t pds_bgnd_brn65101[3U];
+   /* DDK119_3D_LAYOUT: BRN absent on BXE-4-32 (it has only 70165, 72168,
+    * 72463, 74056), so this firmware's struct omits it. */
 
    uint64_t pds_pr_bgnd[3U];
 
-   /* Only used when BRN 62850 or 62865 present. */
-   uint64_t isp_dummy_stencil_store_base;
+   /* DDK119_3D_LAYOUT: BRN absent on BXE-4-32 (it has only 70165, 72168,
+    * 72463, 74056), so this firmware's struct omits it. */
 
-   /* Only used when BRN 66193 present. */
-   uint64_t isp_dummy_depth_store_base;
+   /* DDK119_3D_LAYOUT: BRN absent on BXE-4-32 (it has only 70165, 72168,
+    * 72463, 74056), so this firmware's struct omits it. */
 
-   /* Only used when BRN 67182 present. */
-   uint32_t rgnhdr_single_rt_size;
-   /* Only used when BRN 67182 present. */
-   uint32_t rgnhdr_scratch_offset;
+   /* DDK119_3D_LAYOUT: BRN absent on BXE-4-32 (it has only 70165, 72168,
+    * 72463, 74056), so this firmware's struct omits it. */
 };
 
 /**
@@ -344,7 +355,9 @@ struct rogue_fwif_cmd_3d {
    /* Number of tiles to submit to GPU<N> before moving to GPU<N+1>. */
    uint32_t execute_count;
 
-   uint32_t padding;
+   /* DDK119_3D_LAYOUT: no trailing padding word - that plus its alignment was
+    * the last 8 bytes. The blob's command is 320 bytes with execute_count at
+    * 316, which is exactly where it lands once this goes. */
 };
 
 static_assert(
@@ -373,8 +386,13 @@ struct rogue_fwif_transfer_regs {
    uint32_t isp_render_origin;
    uint32_t isp_ctl;
 
-   /* Only used when feature S7_TOP_INFRASTRUCTURE present. */
-   uint32_t isp_xtp_pipe_enable;
+   /* DDK119_TQ_LAYOUT: isp_xtp_pipe_enable belongs to S7_TOP_INFRASTRUCTURE,
+    * which BXE-4-32 does not have, and this firmware's struct leaves it out.
+    * Emitting it unconditionally shifted every later field by 4 - and by 8
+    * once the alignas(8) section re-aligned - so the firmware read the whole
+    * command misaligned and the transfer silently did nothing. Confirmed
+    * against a transfer captured from the blob driver, whose command is 160
+    * bytes where ours was 192. Nothing writes this field; it is layout only. */
    uint32_t isp_aa;
 
    uint32_t event_pixel_pds_info;
@@ -396,7 +414,12 @@ struct rogue_fwif_transfer_regs {
    uint64_t isp_mtile_base;
    /* TQ_MAX_RENDER_TARGETS * PBE_STATE_SIZE */
 #define ROGUE_PBE_WORDS_REQUIRED_FOR_TQS 3
-   uint64_t pbe_wordx_mrty[PVR_TRANSFER_MAX_RENDER_TARGETS *
+   /* DDK119_TQ_LAYOUT: this firmware sizes the array for two render targets,
+    * not the three PVR_TRANSFER_MAX_RENDER_TARGETS assumes - the blob's
+    * command carries six of these words, ours carried nine. Kept local to the
+    * services fw-api so the upstream-driver winsys is untouched. */
+#define PVR_SRV_TQ_MAX_RENDER_TARGETS 2U
+   uint64_t pbe_wordx_mrty[PVR_SRV_TQ_MAX_RENDER_TARGETS *
                            ROGUE_PBE_WORDS_REQUIRED_FOR_TQS];
 };
 
@@ -459,36 +482,18 @@ struct rogue_fwif_cmd_abort {
  * Configuration registers which need to be loaded by the firmware before CDM
  * can be started.
  */
+/* DDK119_CDM_LAYOUT: this firmware's compute command is 48 bytes, not 96.
+ * Captured from the vendor driver's CDM kick (bridge 129/5): ui32CmdSize=48,
+ * with cdm_ctrl_stream_base at byte 16 where our superset struct put
+ * cdm_cb_queue. The fields for features BXE-4-32 lacks are gone --
+ * CDM_USER_MODE_QUEUE (cdm_cb_queue, cdm_cb_base, cdm_cb), BRN 49927 (tpu),
+ * COMPUTE_MORTON_CAPABLE (cdm_item), CLUSTER_GROUPING (compute_cluster) and
+ * TPU_DM_GLOBAL_REGISTERS (tpu_tag_cdm_ctrl). */
 struct rogue_fwif_cdm_regs {
    uint64_t tpu_border_colour_table;
-
-   /* Only used when feature CDM_USER_MODE_QUEUE present. */
-   uint64_t cdm_cb_queue;
-
-   /* Only used when feature CDM_USER_MODE_QUEUE present. */
-   uint64_t cdm_cb_base;
-   /* Only used when feature CDM_USER_MODE_QUEUE present. */
-   uint64_t cdm_cb;
-
-   /* Only used when feature CDM_USER_MODE_QUEUE is not present. */
    uint64_t cdm_ctrl_stream_base;
-
    uint64_t cdm_context_state_base_addr;
-
-   /* Only used when BRN 49927 is present. */
-   uint32_t tpu;
-
    uint32_t cdm_resume_pds1;
-
-   /* Only used when feature COMPUTE_MORTON_CAPABLE present. */
-   uint32_t cdm_item;
-
-   /* Only used when feature CLUSTER_GROUPING present. */
-   uint32_t compute_cluster;
-
-   /* Only used when feature TPU_DM_GLOBAL_REGISTERS present. */
-   uint32_t tpu_tag_cdm_ctrl;
-
    uint32_t padding;
 };
 
@@ -503,16 +508,12 @@ struct rogue_fwif_cmd_compute {
    alignas(8) struct rogue_fwif_cdm_regs regs;
    alignas(8) uint32_t flags;
 
-   /* Only used when feature UNIFIED_STORE_VIRTUAL_PARTITIONING present. */
-   uint32_t num_temp_regions;
-
-   /* Only used when feature CDM_USER_MODE_QUEUE present. */
-   uint32_t stream_start_offset;
-
    /* Number of tiles to submit to GPU<N> before moving to GPU<N+1>. */
-   /* Only used when feature GPU_MULTICORE_SUPPORT present. */
    uint32_t execute_count;
 };
+
+static_assert(sizeof(struct rogue_fwif_cmd_compute) == 48U,
+              "DDK119_CDM_LAYOUT: the vendor driver sends ui32CmdSize=48");
 
 static_assert(
    offsetof(struct rogue_fwif_cmd_compute, cmn) == 0U,

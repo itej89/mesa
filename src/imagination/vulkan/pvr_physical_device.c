@@ -1,3 +1,5 @@
+#include <stdio.h>
+#include <stdlib.h>
 /*
  * Copyright © 2022 Imagination Technologies Ltd.
  *
@@ -226,7 +228,7 @@ static void pvr_physical_device_get_supported_features(
       .drawIndirectFirstInstance = true,
       .depthClamp = false,
       .depthBiasClamp = true,
-      .fillModeNonSolid = false,
+      .fillModeNonSolid = true,   /* EXPERIMENT: zink base requirement */
       .depthBounds = false,
       .wideLines = true,
       .largePoints = true,
@@ -480,7 +482,7 @@ static void pvr_physical_device_get_supported_features(
       .zeroInitializeDeviceMemory = true,
 
       /* Vulkan 1.2 / VK_KHR_dynamic_rendering */
-      .dynamicRendering = true,
+      .dynamicRendering = !getenv("PVR_NO_DYNAMIC_RENDERING"),
 
       /* VK_KHR_pipeline_executable_properties */
       .pipelineExecutableInfo = true,
@@ -579,14 +581,14 @@ static bool pvr_physical_device_get_properties(
       .sparseAddressSpaceSize = 0U, /* Requires sparseBinding */
       .maxBoundDescriptorSets = 4U,
       .maxPerStageDescriptorSamplers = 16,
-      .maxPerStageDescriptorUniformBuffers = 12,
+      .maxPerStageDescriptorUniformBuffers = 16,   /* EXPERIMENT: was 12 */
       .maxPerStageDescriptorStorageBuffers = 8,
       .maxPerStageDescriptorSampledImages = 16,
       .maxPerStageDescriptorStorageImages = 4,
       .maxPerStageDescriptorInputAttachments = 4,
       .maxPerStageResources = 48,
       .maxDescriptorSetSamplers = 3U * 16U,
-      .maxDescriptorSetUniformBuffers = 3U * 12U,
+      .maxDescriptorSetUniformBuffers = 3U * 16U,  /* EXPERIMENT: was 3*12 */
       .maxDescriptorSetUniformBuffersDynamic = 8U,
       .maxDescriptorSetStorageBuffers = 3U * 4U,
       .maxDescriptorSetStorageBuffersDynamic = 4U,
@@ -1072,6 +1074,9 @@ VkResult pvr_physical_device_init(struct pvr_physical_device *pdevice,
    result =
       pvr_winsys_create(render_path, display_path, true,
                         &instance->vk.alloc, &ws);
+   fprintf(stderr, "PVRPORT pdev: winsys_create(%s, %s) -> %d\n",
+           render_path ? render_path : "(null)",
+           display_path ? display_path : "(null)", (int)result);
    if (result != VK_SUCCESS)
       goto err_vk_free_display_path;
 

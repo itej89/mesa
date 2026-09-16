@@ -94,6 +94,7 @@ foreach d : [[with_gallium_kmsro, [
                'ssd130x',
                'st7586',
                'st7735r',
+               'starfive',
                'sti',
                'stm',
                'sun4i-drm',

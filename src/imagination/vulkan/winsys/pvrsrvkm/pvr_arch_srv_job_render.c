@@ -1,3 +1,11 @@
+#include <stdlib.h>
+static int pvr_dbg_on(void)
+{
+   static int v = -1;
+   if (v < 0)
+      v = getenv("PVR_BRIDGE_DEBUG") ? 1 : 0;
+   return v;
+}
 /*
  * Copyright © 2022 Imagination Technologies Ltd.
  *
@@ -321,7 +329,10 @@ VkResult PVR_PER_ARCH(srv_render_target_dataset_create)(
    struct pvr_srv_winsys *srv_ws = to_pvr_srv_winsys(ws);
    struct pvr_srv_winsys_free_list *srv_local_free_list =
       to_pvr_srv_winsys_free_list(create_info->local_free_list);
-   void *free_lists[ROGUE_FW_MAX_FREELISTS] = { NULL };
+   /* DDK119_FREELIST_SLOTS: 1.19 copies 96 bytes (12 handles) from this
+    * array regardless of how many are used, so it has to be that long or
+    * the kernel reads past it and rejects the garbage as free lists. */
+   void *free_lists[12] = { NULL };
    struct pvr_srv_winsys_rt_dataset *srv_rt_dataset;
    void *handles[ROGUE_FWIF_NUM_RTDATAS];
    struct pvr_rogue_cr_te rogue_te_regs;
@@ -329,11 +340,37 @@ VkResult PVR_PER_ARCH(srv_render_target_dataset_create)(
    uint32_t isp_mtile_size;
    VkResult result;
 
-   free_lists[ROGUE_FW_LOCAL_FREELIST] = srv_local_free_list->handle;
+   /* DDK119_FREELIST_SLOTS: the twelve entries are not a flat list with spare
+    * room - they are RGXMKIF_NUM_RTDATAS (4) x RGXFW_MAX_FREELISTS (3), indexed
+    * [rtdata * 3 + type] where type is LOCAL=0, GLOBAL=1, GLOBAL2=2. Filling
+    * every spare slot with the local list, as this did, put the local list in
+    * the GLOBAL slot of RT datas 1..3 (indices 4, 7, 10). The firmware then
+    * read parameter memory through the wrong free list and faulted:
+    *
+    *   BIF0 - FAULT: PMA (TA Fstack), Reading from 0x80010C7070
+    *   Number of HWR: TA(112/112+0), Guilty Lockup
+    *
+    * with recoveries alternating between two HWRTData addresses - the giveaway
+    * that more than one RT data was in play. */
+   {
+      void *const local = srv_local_free_list->handle;
+      void *const global = srv_local_free_list->parent
+                              ? srv_local_free_list->parent->handle
+                              : local;
 
-   if (srv_local_free_list->parent) {
-      free_lists[ROGUE_FW_GLOBAL_FREELIST] =
-         srv_local_free_list->parent->handle;
+      /* Mesa's own constants say 2 RT datas and 2 freelist kinds - four slots.
+       * This DDK build says otherwise, and the kernel is the authority here:
+       * RGXMKIF_NUM_RTDATAS 4 x RGXFW_MAX_FREELISTS 3 = the twelve handles it
+       * copies. Use the DDK's shape, not Mesa's. */
+#define PVR_SRV_DDK119_NUM_RTDATAS  4U
+#define PVR_SRV_DDK119_NUM_FREELISTS 3U
+      for (unsigned rt = 0; rt < PVR_SRV_DDK119_NUM_RTDATAS; rt++) {
+         void **slot = &free_lists[rt * PVR_SRV_DDK119_NUM_FREELISTS];
+
+         slot[0] = local;  /* RGXFW_LOCAL_FREELIST  */
+         slot[1] = global; /* RGXFW_GLOBAL_FREELIST */
+         slot[2] = global; /* RGXFW_GLOBAL2_FREELIST */
+      }
    }
 
    srv_rt_dataset = vk_zalloc(ws->alloc,
@@ -494,6 +531,13 @@ pvr_srv_geometry_cmd_stream_load(struct rogue_fwif_cmd_ta *const cmd,
    regs->vdm_context_resume_task0_size = *stream_ptr;
    stream_ptr += pvr_cmd_length(VDMCTRL_PDS_STATE0);
 
+   /* DDK119_TA_RESUME: the blob sends zero here; Mesa assigns a VDM PDS state
+    * word to a field the firmware reads as a context-resume size. A non-zero
+    * value may make the firmware treat this as a resumed context and skip the
+    * geometry work, which would leave the render empty with no error. */
+   if (getenv("PVR_ZERO_RESUME"))
+      regs->vdm_context_resume_task0_size = 0;
+
    regs->view_idx = *stream_ptr;
    stream_ptr++;
 
@@ -521,7 +565,7 @@ static void pvr_srv_geometry_cmd_ext_stream_load(
 
    assert(PVR_HAS_QUIRK(dev_info, 49927) == header0.has_brn49927);
    if (header0.has_brn49927) {
-      regs->tpu = *ext_stream_ptr;
+      /* DDK119_3D_LAYOUT: as above - no BRN 49927 on BXE-4-32. */
       ext_stream_ptr += pvr_cmd_length(CR_TPU);
    }
 
@@ -600,14 +644,28 @@ pvr_srv_fragment_cmd_stream_load(struct rogue_fwif_cmd_3d *const cmd,
    stream_ptr += pvr_cmd_length(CR_ISP_STENCIL_LOAD_BASE);
 
    if (PVR_HAS_FEATURE(dev_info, requires_fb_cdc_zls_setup)) {
-      regs->fb_cdc_zls = *(const uint64_t *)stream_ptr;
+      /* DDK119_3D_LAYOUT: no fb_cdc_zls in this firmware's struct; the guard is
+       * false on this part, so only the stream step matters. */
       stream_ptr += 2U;
    }
 
+   /* DDK119_3D_LAYOUT: this firmware carries two render targets' worth of
+    * PBE words, not eight - copy what the struct holds, step the source
+    * over all eight. */
    STATIC_ASSERT(ARRAY_SIZE(regs->pbe_word) == 8U);
-   STATIC_ASSERT(ARRAY_SIZE(regs->pbe_word[0]) == 3U);
+   STATIC_ASSERT(ARRAY_SIZE(regs->pbe_word[0]) == 2U);
    STATIC_ASSERT(sizeof(regs->pbe_word[0][0]) == sizeof(uint64_t));
-   memcpy(regs->pbe_word, stream_ptr, sizeof(regs->pbe_word));
+   /* The source is strided: each attachment occupies
+    * ROGUE_NUM_PBESTATE_REG_WORDS (3) uint64_t in the stream, while this
+    * firmware's command holds 2 per render target. A flat copy would take
+    * three words of attachment 0 and one of attachment 1 as the first two
+    * entries, leaving every attachment after the first with garbage -- which
+    * is what broke MRT while single-attachment rendering worked. */
+   for (uint32_t pbe_i = 0U; pbe_i < ARRAY_SIZE(regs->pbe_word); pbe_i++) {
+      memcpy(regs->pbe_word[pbe_i],
+             stream_ptr + pbe_i * ROGUE_NUM_PBESTATE_REG_WORDS * 2U,
+             sizeof(regs->pbe_word[pbe_i]));
+   }
    stream_ptr += 8U * 3U * 2U;
 
    regs->tpu_border_colour_table = *(const uint64_t *)stream_ptr;
@@ -623,7 +681,9 @@ pvr_srv_fragment_cmd_stream_load(struct rogue_fwif_cmd_3d *const cmd,
    memcpy(regs->pds_pr_bgnd, stream_ptr, sizeof(regs->pds_pr_bgnd));
    stream_ptr += 3U * 2U;
 
-   STATIC_ASSERT(ARRAY_SIZE(regs->usc_clear_register) == 8U);
+   /* DDK119_3D_LAYOUT: four clear registers in this firmware's struct, not
+    * eight - copy what it holds, step the source over all eight. */
+   STATIC_ASSERT(ARRAY_SIZE(regs->usc_clear_register) == 4U);
    STATIC_ASSERT(sizeof(regs->usc_clear_register[0]) == sizeof(uint32_t));
    memcpy(regs->usc_clear_register,
           stream_ptr,
@@ -665,7 +725,8 @@ pvr_srv_fragment_cmd_stream_load(struct rogue_fwif_cmd_3d *const cmd,
    }
 
    if (PVR_HAS_FEATURE(dev_info, zls_subtile)) {
-      regs->isp_zls_pixels = *stream_ptr;
+      /* DDK119_3D_LAYOUT: field absent from this firmware's struct; BXE-4-32
+       * lacks zls_subtile so this never runs, but keep the stream step. */
       stream_ptr += pvr_cmd_length(CR_ISP_ZLS_PIXELS);
    }
 
@@ -704,7 +765,7 @@ static void pvr_srv_fragment_cmd_ext_stream_load(
 
    assert(PVR_HAS_QUIRK(dev_info, 49927) == header0.has_brn49927);
    if (header0.has_brn49927) {
-      regs->tpu = *ext_stream_ptr;
+      /* DDK119_3D_LAYOUT: no tpu field in this firmware's struct. */
       ext_stream_ptr += pvr_cmd_length(CR_TPU);
    }
 
@@ -744,6 +805,12 @@ static void srv_fragment_cmd_init(struct rogue_fwif_cmd_3d *cmd,
    if (state->flags.prevent_cdm_overlap)
       cmd->flags |= ROGUE_FWIF_RENDERFLAGS_PREVENT_CDM_OVERLAP;
 
+   /* DDK119_3D_EXECUTE_COUNT: the blob sends 1 here and Mesa never sets it in
+    * the fragment path - only the compute path does - so it went out as 0.
+    * Testing whether the firmware treats it as a tile batch count. */
+   if (getenv("PVR_EXEC_COUNT"))
+      cmd->execute_count = (uint32_t)atoi(getenv("PVR_EXEC_COUNT"));
+
    if (state->flags.use_single_core)
       cmd->flags |= ROGUE_FWIF_RENDERFLAGS_SINGLE_CORE;
 
@@ -764,6 +831,12 @@ VkResult PVR_PER_ARCH(srv_winsys_render_submit)(
    struct vk_sync *signal_sync_geom,
    struct vk_sync *signal_sync_frag)
 {
+   /* Does a GLES clear reach the render data master at all? zink's clears
+    * read back black while the equivalent Vulkan work is correct, and the
+    * transfer path is already known to be reached. */
+   if (getenv("PVR_SUBMIT_DEBUG"))
+      fprintf(stderr, "PVRSUBMIT render: submit\n");
+
    const struct pvr_srv_winsys_rt_dataset *srv_rt_dataset =
       to_pvr_srv_winsys_rt_dataset(submit_info->rt_dataset);
    struct pvr_srv_sync_prim *sync_prim =
@@ -945,3 +1018,49 @@ end_close_in_fds:
 
    return result;
 }
+
+/* DDK119_OFFSET_DUMP: print the fragment register layout so it can be set beside
+ * the blob's captured bytes. Deriving these offsets by hand is what produced a
+ * wrong "3D is fixed" conclusion earlier; this makes it a lookup. */
+#include <stddef.h>
+__attribute__((constructor)) static void pvr_dump_3d_offsets(void)
+{
+   if (!getenv("PVR_DUMP_OFFSETS"))
+      return;
+
+#define O(f) fprintf(stderr, "  %-32s %3zu\n", #f, \
+                     offsetof(struct rogue_fwif_cmd_3d, regs) + \
+                     offsetof(struct rogue_fwif_3d_regs, f))
+
+   if (pvr_dbg_on()) {
+      if (pvr_dbg_on()) {
+         fprintf(stderr, "OFFSETS sizeof(cmd_3d)=%zu sizeof(3d_regs)=%zu regs_at=%zu\n",
+                 sizeof(struct rogue_fwif_cmd_3d),
+                 sizeof(struct rogue_fwif_3d_regs),
+                 offsetof(struct rogue_fwif_cmd_3d, regs));
+      }
+   }
+   O(usc_pixel_output_ctrl);
+   O(usc_clear_register);
+   O(isp_bgobjdepth);
+   O(isp_bgobjvals);
+   O(isp_aa);
+   O(isp_ctl);
+   O(event_pixel_pds_info);
+   O(pixel_phantom);
+   O(view_idx);
+   O(event_pixel_pds_data);
+   O(isp_oclqry_stride);
+   O(isp_scissor_base);
+   O(isp_dbias_base);
+   O(isp_oclqry_base);
+   O(isp_zlsctl);
+   O(isp_zload_store_base);
+   O(isp_stencil_load_store_base);
+   O(pbe_word);
+   O(tpu_border_colour_table);
+   O(pds_bgnd);
+   O(pds_pr_bgnd);
+#undef O
+}
+/* DDK119_OFFSET_DUMP */

@@ -1,3 +1,4 @@
+#include <stdlib.h>
 #include "zink_clear.h"
 #include "zink_context.h"
 #include "zink_format.h"
@@ -331,6 +332,17 @@ blit_native(struct zink_context *ctx, const struct pipe_blit_info *info, bool *n
    return true;
 }
 
+
+/* Route image copies through a draw; see zink-force-shader-copy.py. */
+static bool
+zink_force_shader_copy(void)
+{
+   static int v = -1;
+   if (v < 0)
+      v = getenv("ZINK_FORCE_SHADER_COPY") ? 1 : 0;
+   return v == 1;
+}
+
 static bool
 try_copy_region(struct pipe_context *pctx, const struct pipe_blit_info *info)
 {
@@ -392,12 +404,14 @@ zink_blit(struct pipe_context *pctx,
        */
       if (info->src.resource->nr_samples > 1 &&
           info->dst.resource->nr_samples <= 1) {
-         if (blit_resolve(ctx, info, &needs_present_readback))
+         if (!zink_force_shader_copy() &&
+             blit_resolve(ctx, info, &needs_present_readback))
             goto end;
       } else {
          if (try_copy_region(pctx, info))
             goto end;
-         if (blit_native(ctx, info, &needs_present_readback))
+         if (!zink_force_shader_copy() &&
+             blit_native(ctx, info, &needs_present_readback))
             goto end;
       }
    }

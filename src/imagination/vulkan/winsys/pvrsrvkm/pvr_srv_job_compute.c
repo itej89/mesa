@@ -100,7 +100,8 @@ VkResult pvr_srv_winsys_compute_ctx_create(
       0U,
       RGX_CONTEXT_FLAG_DISABLESLR,
       0U,
-      UINT_MAX,
+      60000u, /* see PVR_CONTEXT_DEADLINE_MS_DEFAULT: UINT_MAX ms overflows
+               * the firmware's 32-bit tick conversion */
       &srv_ctx->handle);
    if (result != VK_SUCCESS)
       goto err_close_timeline;

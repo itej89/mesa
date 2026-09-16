@@ -1,3 +1,14 @@
+#include <stdlib.h>
+static int pvr_dbg_on(void)
+{
+   static int v = -1;
+   if (v < 0)
+      v = getenv("PVR_BRIDGE_DEBUG") ? 1 : 0;
+   return v;
+}
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdlib.h>
 /*
  * Copyright © 2022 Imagination Technologies Ltd.
  *
@@ -39,6 +50,7 @@
 #include "util/bitscan.h"
 #include "util/macros.h"
 #include "util/u_math.h"
+#include "util/os_file.h"
 #include "vk_alloc.h"
 #include "vk_log.h"
 
@@ -114,6 +126,9 @@ static void buffer_release(struct pvr_srv_winsys_bo *srv_bo)
    if (srv_bo->is_display_buffer)
       pvr_winsys_helper_display_buffer_destroy(ws, srv_bo->handle);
 
+   if (srv_bo->has_import_fd)
+      close(srv_bo->import_fd);
+
    vk_free(ws->alloc, srv_bo);
 }
 
@@ -134,7 +149,13 @@ static uint64_t pvr_srv_get_alloc_flags(uint32_t ws_flags)
                    PVR_SRV_MEMALLOCFLAG_CPU_WRITEABLE;
    }
 
-   if (ws_flags & PVR_WINSYS_BO_FLAG_GPU_UNCACHED)
+   /* GPU_CACHE_INCOHERENT relies on the cache maintenance the DDK expects a
+    * client to queue through the cache bridge - which PCO never calls, so GPU
+    * writes can sit in GPU cache while the CPU (uncached WC) reads stale RAM.
+    * This forces everything uncached to test that; correctness over speed until
+    * the cache ops are wired up. */
+   if ((ws_flags & PVR_WINSYS_BO_FLAG_GPU_UNCACHED) ||
+       getenv("PVR_FORCE_GPU_UNCACHED"))
       srv_flags |= PVR_SRV_MEMALLOCFLAG_GPU_UNCACHED;
    else
       srv_flags |= PVR_SRV_MEMALLOCFLAG_GPU_CACHE_INCOHERENT;
@@ -260,6 +281,10 @@ pvr_srv_winsys_buffer_create_from_fd(struct pvr_winsys *ws,
    srv_bo->base.is_imported = true;
    srv_bo->flags = srv_flags;
 
+   /* Keep the dma-buf itself, so re-exporting it returns the same object. */
+   srv_bo->import_fd = os_dupfd_cloexec(fd);
+   srv_bo->has_import_fd = srv_bo->import_fd >= 0;
+
    p_atomic_set(&srv_bo->ref_count, 1);
 
    *bo_out = &srv_bo->base;
@@ -285,6 +310,13 @@ VkResult pvr_srv_winsys_buffer_get_fd(struct pvr_winsys_bo *bo,
    struct pvr_srv_winsys_bo *srv_bo = to_pvr_srv_winsys_bo(bo);
    struct pvr_winsys *ws = bo->ws;
    int ret;
+
+   if (srv_bo->has_import_fd) {
+      *fd_out = os_dupfd_cloexec(srv_bo->import_fd);
+      if (*fd_out < 0)
+         return vk_error(NULL, VK_ERROR_OUT_OF_HOST_MEMORY);
+      return VK_SUCCESS;
+   }
 
    if (!srv_bo->is_display_buffer)
       return pvr_srv_physmem_export_dmabuf(ws->render_fd, srv_bo->pmr, fd_out);
@@ -514,14 +546,33 @@ VkResult pvr_srv_winsys_vma_map(struct pvr_winsys_vma *vma,
    /* Address should not be mapped already */
    assert(!vma->bo);
 
-   if (srv_bo->is_display_buffer) {
+   /* DevmemIntMapPages is NOT_IMPLEMENTED on DDK 1.19 */
+   bool mapped_whole_pmr = false;
+   if (srv_bo->is_display_buffer || getenv("PVR_FORCE_MAP_PMR")) {
+      mapped_whole_pmr = true;
       struct pvr_srv_winsys_heap *srv_heap = to_pvr_srv_winsys_heap(vma->heap);
 
       /* In case of display buffers, we only support to map whole PMR */
-      if (offset != 0 || bo->size != ALIGN_POT(size, srv_ws->base.page_size) ||
-          vma->size != bo->size) {
+      if (!getenv("PVR_FORCE_MAP_PMR") &&
+          (offset != 0 || bo->size != ALIGN_POT(size, srv_ws->base.page_size) ||
+           vma->size != bo->size)) {
          return vk_error(NULL, VK_ERROR_MEMORY_MAP_FAILED);
       }
+
+      /* MapPMR maps the whole PMR at the reservation base and has nowhere to
+       * put a sub-range offset, so log what is being asked for: a non-zero
+       * offset here means the GPU address is wrong by exactly that much. */
+      if (getenv("PVR_MAP_DEBUG"))
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               fprintf(stderr,
+                       "MAPDBG offset=%llu size=%llu bo_size=%llu vma_size=%llu "
+                       "dev_addr=0x%llx\n",
+                       (unsigned long long)offset, (unsigned long long)size,
+                       (unsigned long long)bo->size, (unsigned long long)vma->size,
+                       (unsigned long long)vma->dev_addr.addr);
+            }
+         }
 
       /* Map the requested pmr */
       result = pvr_srv_int_map_pmr(srv_ws->base.render_fd,
@@ -562,8 +613,27 @@ VkResult pvr_srv_winsys_vma_map(struct pvr_winsys_vma *vma,
    vma->bo_offset = offset;
    vma->mapped_size = aligned_virt_size;
 
-   if (dev_addr_out)
-      *dev_addr_out = PVR_DEV_ADDR_OFFSET(vma->dev_addr, virt_offset);
+   if (dev_addr_out) {
+      /* MapPMR put the whole PMR at the reservation base, so the buffer's
+       * address is base + the FULL offset. The MapPages path instead mapped
+       * from the page-aligned offset, so only the sub-page remainder applies.
+       */
+      *dev_addr_out = PVR_DEV_ADDR_OFFSET(vma->dev_addr,
+                                          mapped_whole_pmr ? offset
+                                                           : virt_offset);
+      if (getenv("PVR_TRACE"))
+         if (pvr_dbg_on()) {
+            if (pvr_dbg_on()) {
+               fprintf(stderr, "PVRTRACE vma_map whole_pmr=%d offset=%llu size=%llu "
+                       "vma_base=0x%llx vma_size=%llu -> dev_addr=0x%llx\n",
+                       (int)mapped_whole_pmr, (unsigned long long)offset,
+                       (unsigned long long)size,
+                       (unsigned long long)vma->dev_addr.addr,
+                       (unsigned long long)vma->size,
+                       (unsigned long long)dev_addr_out->addr);
+            }
+         }
+   }
 
    return VK_SUCCESS;
 }

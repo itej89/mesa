@@ -21,6 +21,7 @@
  * SOFTWARE.
  */
 
+#include <stdio.h>
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -164,14 +165,17 @@ pvr_buffer_create_and_map(struct pvr_winsys *const ws,
                                    PVR_WINSYS_BO_TYPE_GPU,
                                    PVR_WINSYS_BO_FLAG_CPU_ACCESS,
                                    &bo);
+   fprintf(stderr, "PVRPORT bcm: buffer_create -> %d\n", (int)result);
    if (result != VK_SUCCESS)
       goto err_out;
 
    result = heap_alloc_carveout(heap, dev_addr, size, alignment, &vma);
+   fprintf(stderr, "PVRPORT bcm: alloc_carveout -> %d\n", (int)result);
    if (result != VK_SUCCESS)
       goto err_pvr_winsys_buffer_destroy;
 
    result = ws->ops->vma_map(vma, bo, 0, size, NULL);
+   fprintf(stderr, "PVRPORT bcm: vma_map -> %d\n", (int)result);
    if (result != VK_SUCCESS)
       goto err_pvr_winsys_heap_free;
 
@@ -227,6 +231,10 @@ VkResult pvr_winsys_helper_allocate_static_memory(
                                       general_heap->static_data_carveout_size,
                                       general_heap->page_size,
                                       &general_vma);
+   fprintf(stderr, "PVRPORT carve: general_heap addr=0x%llx size=0x%llx -> %d\n",
+           (unsigned long long)general_heap->static_data_carveout_addr.addr,
+           (unsigned long long)general_heap->static_data_carveout_size,
+           (int)result);
    if (result != VK_SUCCESS)
       goto err_out;
 
@@ -237,6 +245,10 @@ VkResult pvr_winsys_helper_allocate_static_memory(
                                       pds_heap->static_data_carveout_size,
                                       pds_heap->page_size,
                                       &pds_vma);
+   fprintf(stderr, "PVRPORT carve: pds_heap addr=0x%llx size=0x%llx -> %d\n",
+           (unsigned long long)pds_heap->static_data_carveout_addr.addr,
+           (unsigned long long)pds_heap->static_data_carveout_size,
+           (int)result);
    if (result != VK_SUCCESS)
       goto err_pvr_buffer_destroy_and_unmap_general;
 
@@ -247,6 +259,10 @@ VkResult pvr_winsys_helper_allocate_static_memory(
                                       pds_heap->static_data_carveout_size,
                                       usc_heap->page_size,
                                       &usc_vma);
+   fprintf(stderr, "PVRPORT carve: usc_heap addr=0x%llx size=0x%llx -> %d\n",
+           (unsigned long long)usc_heap->static_data_carveout_addr.addr,
+           (unsigned long long)usc_heap->static_data_carveout_size,
+           (int)result);
    if (result != VK_SUCCESS)
       goto err_pvr_buffer_destroy_and_unmap_pds;
 

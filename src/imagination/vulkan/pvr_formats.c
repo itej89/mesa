@@ -1,3 +1,4 @@
+#include <stdlib.h>
 /*
  * Copyright © 2022 Imagination Technologies Ltd.
  *
@@ -245,6 +246,17 @@ pvr_get_format(struct pvr_physical_device *pdevice, VkFormat vk_format)
    return NULL;
 }
 
+
+/* When set, do not advertise blit support, so callers fall back to rendering.
+ * See try-no-vk-blit.py: the transfer path truncates large copies. */
+static bool pvr_no_vk_blit(void)
+{
+   static int v = -1;
+   if (v < 0)
+      v = getenv("PVR_NO_VK_BLIT") ? 1 : 0;
+   return v == 1;
+}
+
 static VkFormatFeatureFlags2
 pvr_get_image_format_features2(struct pvr_physical_device *pdevice,
                                VkFormat vk_format,
@@ -282,7 +294,8 @@ pvr_get_image_format_features2(struct pvr_physical_device *pdevice,
          if (ycbcr_info) {
             flags |= VK_FORMAT_FEATURE_2_COSITED_CHROMA_SAMPLES_BIT;
          } else {
-            flags |= VK_FORMAT_FEATURE_2_BLIT_SRC_BIT;
+            if (!pvr_no_vk_blit())
+               flags |= VK_FORMAT_FEATURE_2_BLIT_SRC_BIT;
          }
       } else if (!vk_format_is_block_compressed(vk_format)) {
          flags |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
@@ -292,7 +305,8 @@ pvr_get_image_format_features2(struct pvr_physical_device *pdevice,
          if (ycbcr_info) {
             flags |= VK_FORMAT_FEATURE_2_COSITED_CHROMA_SAMPLES_BIT;
          } else {
-            flags |= VK_FORMAT_FEATURE_2_BLIT_SRC_BIT;
+            if (!pvr_no_vk_blit())
+               flags |= VK_FORMAT_FEATURE_2_BLIT_SRC_BIT;
          }
       }
    }
@@ -332,6 +346,10 @@ pvr_get_image_format_features2(struct pvr_physical_device *pdevice,
       flags |= VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
                VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT;
    }
+
+   if (pvr_no_vk_blit())
+      flags &= ~(VkFormatFeatureFlags2)(VK_FORMAT_FEATURE_2_BLIT_SRC_BIT |
+                                        VK_FORMAT_FEATURE_2_BLIT_DST_BIT);
 
    return flags;
 }
@@ -390,7 +408,11 @@ pvr_get_buffer_format_features2(struct pvr_physical_device *pdevice,
       flags |= VK_FORMAT_FEATURE_2_VERTEX_BUFFER_BIT;
 
    if (vk_format_is_scaled(vk_format))
-      return flags;
+      if (pvr_no_vk_blit())
+      flags &= ~(VkFormatFeatureFlags2)(VK_FORMAT_FEATURE_2_BLIT_SRC_BIT |
+                                        VK_FORMAT_FEATURE_2_BLIT_DST_BIT);
+
+   return flags;
 
    flags |= VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
             VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT;
@@ -449,6 +471,10 @@ pvr_get_buffer_format_features2(struct pvr_physical_device *pdevice,
       flags |= VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
                VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT;
    }
+
+   if (pvr_no_vk_blit())
+      flags &= ~(VkFormatFeatureFlags2)(VK_FORMAT_FEATURE_2_BLIT_SRC_BIT |
+                                        VK_FORMAT_FEATURE_2_BLIT_DST_BIT);
 
    return flags;
 }

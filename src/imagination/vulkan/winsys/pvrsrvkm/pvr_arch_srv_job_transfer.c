@@ -62,7 +62,11 @@ srv_transfer_cmd_stream_load(struct rogue_fwif_cmd_transfer *const cmd,
    memcpy(&regs->isp_mtile_base, stream_ptr, sizeof(regs->isp_mtile_base));
    stream_ptr += pvr_cmd_length(CR_ISP_MTILE_BASE);
 
-   STATIC_ASSERT(ARRAY_SIZE(regs->pbe_wordx_mrty) == 9U);
+   /* PVRPORT: six, not nine -- this firmware's TQ command carries two render
+    * targets' worth of PBE words, not the three PVR_TRANSFER_MAX_RENDER_TARGETS
+    * assumes. The header side of this is fix-pbe-word-stride.py; this is the
+    * matching stream walk. Reconstructed, see fix-pbe-stride-c-side.py. */
+   STATIC_ASSERT(ARRAY_SIZE(regs->pbe_wordx_mrty) == 6U);
    STATIC_ASSERT(sizeof(regs->pbe_wordx_mrty[0]) == sizeof(uint64_t));
    memcpy(regs->pbe_wordx_mrty, stream_ptr, sizeof(regs->pbe_wordx_mrty));
    stream_ptr += 9U * 2U;

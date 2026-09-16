@@ -21,6 +21,7 @@
  * SOFTWARE.
  */
 
+#include <stdio.h>
 #include <fcntl.h>
 #include <stdbool.h>
 #include <vulkan/vulkan.h>
@@ -95,11 +96,14 @@ VkResult pvr_winsys_create(const char *render_path,
       goto err_close_display_fd;
    }
 
+   fprintf(stderr, "PVRPORT ws: drm name=%s (drm=%s srv=%s)\n",
+           version->name, PVR_DRM_DRIVER_NAME, PVR_SRV_DRIVER_NAME);
    if (strcmp(version->name, PVR_DRM_DRIVER_NAME) == 0) {
       result = pvr_drm_winsys_create(render_fd, display_fd, alloc, ws_out);
 #if defined(PVR_SUPPORT_SERVICES_DRIVER)
    } else if (strcmp(version->name, PVR_SRV_DRIVER_NAME) == 0) {
       result = pvr_srv_winsys_create(render_fd, display_fd, alloc, ws_out);
+      fprintf(stderr, "PVRPORT ws: srv_winsys_create -> %d\n", (int)result);
 #endif
    } else {
       result = vk_errorf(

@@ -1,3 +1,11 @@
+#include <stdlib.h>
+static int pvr_dbg_on(void)
+{
+   static int v = -1;
+   if (v < 0)
+      v = getenv("PVR_BRIDGE_DEBUG") ? 1 : 0;
+   return v;
+}
 /*
  * Copyright © 2022 Imagination Technologies Ltd.
  *
@@ -38,7 +46,9 @@ static void pvr_error_check(PVR_ERR_CALLBACK err_callback,
    if (err_callback)
       err_callback(error);
    else
-      fprintf(stderr, "ERROR: %s\n", error.text);
+      if (pvr_dbg_on()) {
+         fprintf(stderr, "ERROR: %s\n", error.text);
+      }
 }
 
 #define X(a) #a,

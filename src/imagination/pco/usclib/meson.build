@@ -7,6 +7,24 @@ pco_usclib_shader_files = files(
   'tex.cl',
 )
 
+# mesa_clc does not add Clang's own resource include directory, so the OpenCL
+# headers it implicitly includes (opencl-c-base.h) are not found. Ask clang
+# where they are instead of hardcoding an LLVM version.
+_clang_res = run_command(
+  'sh', '-c',
+  'for c in clang clang-15 clang-16 clang-17 clang-18; do ' +
+  '  d=$($c -print-resource-dir 2>/dev/null) || continue; ' +
+  '  [ -d "$d/include" ] && echo "$d/include" && exit 0; ' +
+  'done; exit 1',
+  check : false,
+)
+if _clang_res.returncode() == 0
+  clang_resource_inc = ['-I' + _clang_res.stdout().strip()]
+else
+  clang_resource_inc = []
+  warning('clang resource dir not found; mesa_clc may fail on opencl-c-base.h')
+endif
+
 pco_usclib_spv = custom_target(
   'pco_usclib.spv',
   input : pco_usclib_shader_files,
@@ -22,6 +40,7 @@ pco_usclib_spv = custom_target(
     '-I' + join_paths(meson.current_source_dir(), '../../include'),
     '-I' + join_paths(meson.current_source_dir(), '../../..'),
     '-I' + join_paths(meson.current_build_dir(), '../..'),
+    clang_resource_inc,
     cl_args,
   ],
   depends : [pco_pygen_sources, pvr_xml_pack],

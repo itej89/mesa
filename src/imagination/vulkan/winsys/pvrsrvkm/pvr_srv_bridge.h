@@ -50,20 +50,21 @@
 
 #define PVR_SRV_BRIDGE_MM 6UL
 
+/* MM ids shifted by -5 for DDK 1.19; see shift_mm_bridge.py */
 #define PVR_SRV_BRIDGE_MM_PMRUNREFUNLOCKPMR 8UL
-#define PVR_SRV_BRIDGE_MM_PHYSMEMNEWRAMBACKEDLOCKEDPMR 10UL
-#define PVR_SRV_BRIDGE_MM_DEVMEMINTCTXCREATE 15UL
-#define PVR_SRV_BRIDGE_MM_DEVMEMINTCTXDESTROY 16UL
-#define PVR_SRV_BRIDGE_MM_DEVMEMINTHEAPCREATE 17UL
-#define PVR_SRV_BRIDGE_MM_DEVMEMINTHEAPDESTROY 18UL
-#define PVR_SRV_BRIDGE_MM_DEVMEMINTMAPPMR 19UL
-#define PVR_SRV_BRIDGE_MM_DEVMEMINTUNMAPPMR 20UL
-#define PVR_SRV_BRIDGE_MM_DEVMEMINTRESERVERANGE 21UL
-#define PVR_SRV_BRIDGE_MM_DEVMEMINTUNRESERVERANGE 22UL
-#define PVR_SRV_BRIDGE_MM_DEVMEMINTMAPPAGES 24UL
-#define PVR_SRV_BRIDGE_MM_DEVMEMINTUNMAPPAGES 25UL
-#define PVR_SRV_BRIDGE_MM_HEAPCFGHEAPCOUNT 30UL
-#define PVR_SRV_BRIDGE_MM_HEAPCFGHEAPDETAILS 32UL
+#define PVR_SRV_BRIDGE_MM_PHYSMEMNEWRAMBACKEDLOCKEDPMR 9UL
+#define PVR_SRV_BRIDGE_MM_DEVMEMINTCTXCREATE 10UL
+#define PVR_SRV_BRIDGE_MM_DEVMEMINTCTXDESTROY 11UL
+#define PVR_SRV_BRIDGE_MM_DEVMEMINTHEAPCREATE 12UL
+#define PVR_SRV_BRIDGE_MM_DEVMEMINTHEAPDESTROY 13UL
+#define PVR_SRV_BRIDGE_MM_DEVMEMINTMAPPMR 14UL
+#define PVR_SRV_BRIDGE_MM_DEVMEMINTUNMAPPMR 15UL
+#define PVR_SRV_BRIDGE_MM_DEVMEMINTRESERVERANGE 16UL
+#define PVR_SRV_BRIDGE_MM_DEVMEMINTUNRESERVERANGE 17UL
+#define PVR_SRV_BRIDGE_MM_DEVMEMINTMAPPAGES 19UL
+#define PVR_SRV_BRIDGE_MM_DEVMEMINTUNMAPPAGES 20UL
+#define PVR_SRV_BRIDGE_MM_HEAPCFGHEAPCOUNT 24UL
+#define PVR_SRV_BRIDGE_MM_HEAPCFGHEAPDETAILS 26UL
 
 #define PVR_SRV_BRIDGE_DMABUF 11UL
 
@@ -137,8 +138,8 @@
    (SUPPORT_RGX_SET_OFFSET | DEBUG_SET_OFFSET | \
     SUPPORT_BUFFER_SYNC_SET_OFFSET | OPTIONS_BIT31)
 
-#define PVR_SRV_VERSION_MAJ 1U
-#define PVR_SRV_VERSION_MIN 17U
+#define PVR_SRV_VERSION_MAJ 1
+#define PVR_SRV_VERSION_MIN 19
 
 #define PVR_SRV_VERSION                                              \
    (((uint32_t)((uint32_t)(PVR_SRV_VERSION_MAJ) & 0xFFFFU) << 16U) | \
@@ -328,9 +329,10 @@ struct pvr_srv_heap_cfg_details_ret {
  ******************************************************************************/
 
 struct pvr_srv_devmem_int_heap_create_cmd {
-   pvr_dev_addr_t base_addr;
-   uint64_t size;
+   uint64_t unused;
    void *server_memctx;
+   uint32_t heap_config_index;
+   uint32_t heap_index;
    uint32_t log2_page_size;
 } PACKED;
 
@@ -383,17 +385,16 @@ struct pvr_srv_bridge_in_devmem_int_unreserve_range_ret {
  ******************************************************************************/
 
 struct pvr_srv_physmem_new_ram_backed_locked_pmr_cmd {
-   uint64_t block_size;
-   uint64_t size;
-   uint32_t *mapping_table;
-   const char *annotation;
-   uint32_t annotation_size;
-   uint32_t log2_page_size;
-   uint32_t phy_blocks;
-   uint32_t virt_blocks;
-   uint32_t pdump_flags;
-   uint32_t pid;
-   uint64_t flags;
+   uint64_t size;              /*  0 */
+   uint32_t *mapping_table;    /*  8 */
+   const char *annotation;     /* 16 */
+   uint32_t annotation_size;   /* 24 */
+   uint32_t log2_page_size;    /* 28 */
+   uint32_t virt_blocks;       /* 32 */
+   uint32_t phy_blocks;        /* 36 */
+   uint32_t pid;               /* 40 */
+   uint32_t pdump_flags;       /* 44 */
+   uint64_t flags;             /* 48 */
 } PACKED;
 
 struct pvr_srv_physmem_new_ram_backed_locked_pmr_ret {
@@ -509,20 +510,20 @@ struct pvr_srv_phys_mem_export_dmabuf_ret {
  ******************************************************************************/
 
 struct pvr_srv_rgx_create_transfer_context_cmd {
-   uint64_t robustness_address;
-   void *priv_data;
-   uint8_t *reset_framework_cmd;
-   uint32_t context_flags;
-   uint32_t reset_framework_cmd_size;
-   uint32_t packed_ccb_size_u8888;
-   uint32_t priority;
+   uint64_t robustness_address;        /*  0 */
+   void *priv_data;                    /*  8 */
+   uint8_t *reset_framework_cmd;       /* 16 */
+   uint32_t priority;                  /* 24 */
+   uint32_t context_flags;             /* 28 */
+   uint32_t reset_framework_cmd_size;  /* 32 */
+   uint32_t packed_ccb_size_u8888;     /* 36 */
 } PACKED;
 
 struct pvr_srv_rgx_create_transfer_context_ret {
-   void *cli_pmr_mem;
-   void *transfer_context;
+   void *transfer_context;             /*  0 */
+   enum pvr_srv_error error;           /*  8 */
+   void *cli_pmr_mem;                  /* unused by 1.19 */
    void *usc_pmr_mem;
-   enum pvr_srv_error error;
 } PACKED;
 
 /******************************************************************************
@@ -572,17 +573,16 @@ struct pvr_srv_rgx_submit_transfer2_ret {
  ******************************************************************************/
 
 struct pvr_srv_rgx_create_compute_context_cmd {
-   uint64_t robustness_address;
-   void *priv_data;
-   uint8_t *reset_framework_cmd;
-   uint8_t *static_compute_context_state;
-   uint32_t context_flags;
-   uint32_t reset_framework_cmd_size;
-   uint32_t max_deadline_ms;
-   uint32_t packed_ccb_size;
-   /* RGX_CONTEXT_PRIORITY_... flags. */
-   uint32_t priority;
-   uint32_t static_compute_context_state_size;
+   uint64_t robustness_address;             /*  0 */
+   void *priv_data;                         /*  8 */
+   uint8_t *reset_framework_cmd;            /* 16 */
+   uint8_t *static_compute_context_state;   /* 24 */
+   uint32_t priority;                       /* 32 */
+   uint32_t context_flags;                  /* 36 */
+   uint32_t reset_framework_cmd_size;       /* 40 */
+   uint32_t max_deadline_ms;                /* 44 */
+   uint32_t packed_ccb_size;                /* 48 */
+   uint32_t static_compute_context_state_size; /* 52 */
 } PACKED;
 
 struct pvr_srv_rgx_create_compute_context_ret {
@@ -702,11 +702,18 @@ struct pvr_srv_rgx_create_free_list_cmd {
    void *mem_ctx_priv_data;
    void *free_list_pmr;
    void *global_free_list;
-   enum pvr_srv_bool free_list_check;
+   /* DDK119_FREELIST_LAYOUT: the check flag goes LAST and is a single byte, not
+    * a 4-byte enum before the counts - the vendor struct is five 8-byte fields,
+    * four u32, then IMG_BOOL, which is 57 bytes against the 60 we were sending.
+    * With it first, the kernel read init/max/grow pages from the wrong offsets
+    * and built a malformed free list, which is what made the parameter manager
+    * read unmapped memory:
+    *   BIF0 - FAULT: PMA (TA Fstack), Reading from 0x80010C7070 */
    uint32_t grow_free_list_pages;
    uint32_t grow_param_threshold;
    uint32_t init_free_list_pages;
    uint32_t max_free_list_pages;
+   uint8_t free_list_check;
 } PACKED;
 
 struct pvr_srv_rgx_create_free_list_ret {
@@ -730,25 +737,25 @@ struct pvr_srv_rgx_destroy_free_list_ret {
    PVR_SRV_BRIDGE_RGXTA3D_RGXCREATERENDERCONTEXT structs
  ******************************************************************************/
 
-struct pvr_srv_rgx_create_render_context_cmd {
-   pvr_dev_addr_t vdm_callstack_addr;
-   uint64_t robustness_address;
-   void *priv_data;
-   uint8_t *reset_framework_cmd;
-   uint8_t *static_render_context_state;
 #define RGX_CONTEXT_FLAG_DISABLESLR BITFIELD_BIT(0U)
-   uint32_t context_flags;
-   uint32_t reset_framework_cmd_size;
-   uint32_t max_3d_deadline_ms;
-   uint32_t max_ta_deadline_ms;
-   uint32_t packed_ccb_size;
 #define RGX_CONTEXT_PRIORITY_REALTIME UINT32_MAX
 #define RGX_CONTEXT_PRIORITY_HIGH 2U
 #define RGX_CONTEXT_PRIORITY_MEDIUM 1U
 #define RGX_CONTEXT_PRIORITY_LOW 0U
-   uint32_t priority;
-   uint32_t static_render_context_state_size;
-   uint32_t call_stack_depth;
+struct pvr_srv_rgx_create_render_context_cmd {
+   pvr_dev_addr_t vdm_callstack_addr;        /*  0 */
+   uint64_t robustness_address;              /*  8 */
+   void *priv_data;                          /* 16 */
+   uint8_t *reset_framework_cmd;             /* 24 */
+   uint8_t *static_render_context_state;     /* 32 */
+   uint32_t priority;                        /* 40 */
+   uint32_t context_flags;                   /* 44 */
+   uint32_t reset_framework_cmd_size;        /* 48 */
+   uint32_t max_3d_deadline_ms;              /* 52 */
+   uint32_t max_ta_deadline_ms;              /* 56 */
+   uint32_t packed_ccb_size;                 /* 60 */
+   uint32_t static_render_context_state_size;/* 64 */
+   uint32_t call_stack_depth;                /* 68 */
 } PACKED;
 
 struct pvr_srv_rgx_create_render_context_ret {
@@ -773,57 +780,65 @@ struct pvr_srv_rgx_destroy_render_context_ret {
  ******************************************************************************/
 
 struct pvr_srv_rgx_kick_ta3d2_cmd {
-   uint64_t deadline;
-   void *hw_rt_dataset;
-   void *msaa_scratch_buffer;
-   void *pr_fence_ufo_sync_prim_block;
-   void *render_ctx;
-   void *zs_buffer;
-   uint32_t *client_3d_update_sync_offset;
-   uint32_t *client_3d_update_value;
-   uint32_t *client_ta_fence_sync_offset;
-   uint32_t *client_ta_fence_value;
-   uint32_t *client_ta_update_sync_offset;
-   uint32_t *client_ta_update_value;
-   uint32_t *sync_pmr_flags;
-   uint8_t *cmd_3d;
-   uint8_t *cmd_3d_pr;
-   uint8_t *cmd_ta;
-   char *update_fence_name;
-   char *update_fence_name_3d;
-   void **client_3d_update_sync_prim_block;
-   void **client_ta_fence_sync_prim_block;
-   void **client_ta_update_sync_prim_block;
-   void **sync_pmrs;
-   enum pvr_srv_bool abort;
-   enum pvr_srv_bool kick_3d;
-   enum pvr_srv_bool kick_pr;
-   enum pvr_srv_bool kick_ta;
-   int32_t check_fence;
-   int32_t check_fence_3d;
-   int32_t update_timeline;
-   int32_t update_timeline_3d;
-   uint32_t cmd_3d_size;
-   uint32_t cmd_3d_pr_size;
-   uint32_t client_3d_update_count;
-   uint32_t client_ta_fence_count;
-   uint32_t client_ta_update_count;
-   uint32_t ext_job_ref;
-   uint32_t num_draw_calls;
-   uint32_t num_indices;
-   uint32_t num_mrts;
-   uint32_t pdump_flags;
-   uint32_t client_pr_fence_ufo_sync_offset;
-   uint32_t client_pr_fence_value;
-   uint32_t render_target_size;
-   uint32_t sync_pmr_count;
-   uint32_t cmd_ta_size;
+   uint64_t deadline;                          /*   0 */
+   void *hw_rt_dataset;                        /*   8 */
+   void *msaa_scratch_buffer;                  /*  16 */
+   void *pr_fence_ufo_sync_prim_block;         /*  24 */
+   void *render_ctx;                           /*  32 */
+   void *zs_buffer;                            /*  40 */
+   uint32_t *client_3d_update_sync_offset;     /*  48 */
+   uint32_t *client_3d_update_value;           /*  56 */
+   uint32_t *client_ta_fence_sync_offset;      /*  64 */
+   uint32_t *client_ta_fence_value;            /*  72 */
+   uint32_t *client_ta_update_sync_offset;     /*  80 */
+   uint32_t *client_ta_update_value;           /*  88 */
+   uint32_t *sync_pmr_flags;                   /*  96 */
+   uint8_t *cmd_3d;                            /* 104 */
+   uint8_t *cmd_3d_pr;                         /* 112 */
+   uint8_t *cmd_ta;                            /* 120 */
+   char *update_fence_name;                    /* 128 */
+   char *update_fence_name_3d;                 /* 136 */
+   void **client_3d_update_sync_prim_block;    /* 144 */
+   void **client_ta_fence_sync_prim_block;     /* 152 */
+   void **client_ta_update_sync_prim_block;    /* 160 */
+   void **sync_pmrs;                           /* 168 */
+   /* DDK119_KICK_TAIL: 1.19 lays the tail out differently from the version PCO
+    * carries, and the whole request is 256 bytes rather than 268.  Confirmed
+    * against a kick captured from the blob GLES driver through the same ioctl:
+    * both check fences sit at 176/180 as -1, the two update timelines follow at
+    * 184/188, and the four bools are one byte each at 252..255 - which is why
+    * the kernel was resolving the 'abort' word as a fence fd and failing on
+    * fd 0.  The 15 u32 between are ordered to match the argument slots the
+    * bridge builds for PVRSRVRGXKickTA3DKM. */
+   int32_t check_fence;                        /* 176 */
+   int32_t check_fence_3d;                     /* 180 */
+   int32_t update_timeline;                    /* 184 */
+   int32_t update_timeline_3d;                 /* 188 */
+   uint32_t cmd_3d_size;                       /* 192 */
+   uint32_t cmd_3d_pr_size;                    /* 196 */
+   uint32_t client_3d_update_count;            /* 200 */
+   uint32_t client_ta_fence_count;             /* 204 */
+   uint32_t client_ta_update_count;            /* 208 */
+   uint32_t ext_job_ref;                       /* 212 */
+   uint32_t num_draw_calls;                    /* 216 */
+   uint32_t num_indices;                       /* 220 */
+   uint32_t num_mrts;                          /* 224 */
+   uint32_t pdump_flags;                       /* 228 */
+   uint32_t client_pr_fence_ufo_sync_offset;   /* 232 */
+   uint32_t client_pr_fence_value;             /* 236 */
+   uint32_t render_target_size;                /* 240 */
+   uint32_t sync_pmr_count;                    /* 244 */
+   uint32_t cmd_ta_size;                       /* 248 */
+   uint8_t abort;                              /* 252 */
+   uint8_t kick_3d;                            /* 253 */
+   uint8_t kick_pr;                            /* 254 */
+   uint8_t kick_ta;                            /* 255 */
 } PACKED;
 
 struct pvr_srv_rgx_kick_ta3d2_ret {
-   enum pvr_srv_error error;
-   int32_t update_fence;
-   int32_t update_fence_3d;
+   enum pvr_srv_error error;  /* 0 - the kernel writes bytes 0..3 here */
+   int32_t update_fence;      /* 4 */
+   int32_t update_fence_3d;   /* 8 */
 } PACKED;
 
 /******************************************************************************
@@ -919,6 +934,7 @@ VkResult pvr_srv_int_heap_create(int fd,
                                  pvr_dev_addr_t base_address,
                                  uint64_t size,
                                  uint32_t log2_page_size,
+                                 uint32_t heap_index,
                                  void *server_memctx,
                                  void **const server_heap_out);
 void pvr_srv_int_heap_destroy(int fd, void *server_heap);

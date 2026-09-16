@@ -30,6 +30,7 @@
 
 #include "pvr_device.h"
 #include "pvr_srv.h"
+#include <stdio.h>
 #include "pvr_srv_sync.h"
 #include "util/libsync.h"
 #include "util/macros.h"

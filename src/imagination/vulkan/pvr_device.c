@@ -495,8 +495,17 @@ VkResult pvr_bind_memory(struct pvr_device *device,
                          struct pvr_winsys_vma **const vma_out,
                          pvr_dev_addr_t *const dev_addr_out)
 {
+   /* The MapPages path maps from the page-aligned offset, so only the
+    * sub-page remainder needs reserving. The whole-PMR path maps the PMR at
+    * the reservation base and puts the binding at base + the full offset, so
+    * the reservation has to span it -- otherwise the tail of the buffer has
+    * no address space behind it and is silently dropped. See
+    * pvr_srv_winsys_vma_map(), which chooses between the two the same way.
+    */
+   const bool whole_pmr = getenv("PVR_FORCE_MAP_PMR") != NULL;
    VkDeviceSize virt_size =
-      size + (offset & (device->heaps.general_heap->page_size - 1));
+      whole_pmr ? size + offset
+                : size + (offset & (device->heaps.general_heap->page_size - 1));
    struct pvr_winsys_vma *vma;
    pvr_dev_addr_t dev_addr;
    VkResult result;

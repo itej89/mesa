@@ -126,6 +126,13 @@ struct pvr_srv_winsys_bo {
    bool is_display_buffer;
    uint32_t handle;
    uint64_t flags;
+
+   /* For a buffer imported from a dma-buf: a duplicate of that fd, so an
+    * export hands back the original object instead of wrapping the PMR in a
+    * new PowerVR dma-buf, which other devices cannot attach to.
+    */
+   bool has_import_fd;
+   int import_fd;
 };
 
 struct pvr_srv_winsys_vma {

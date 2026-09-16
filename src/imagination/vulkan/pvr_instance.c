@@ -10,6 +10,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <stdio.h>
 #include "pvr_instance.h"
 
 #include <fcntl.h>
@@ -69,6 +70,8 @@ static VkResult pvr_get_drm_devices(void *const obj,
                                     int *const num_devices_out)
 {
    int ret = drmGetDevices2(0, devices, max_devices);
+   fprintf(stderr, "PVRPORT enum: drmGetDevices2(max=%d) -> %d\n",
+           max_devices, ret);
    if (ret < 0) {
       return vk_errorf(obj,
                        VK_ERROR_INITIALIZATION_FAILED,
@@ -90,6 +93,10 @@ pvr_drm_device_is_compatible(drmDevicePtr drm_dev)
    bool is_pvr;
    int32_t fd;
 
+   fprintf(stderr, "PVRPORT enum: candidate nodes=0x%x render=%s\n",
+           drm_dev->available_nodes,
+           (drm_dev->available_nodes & (1 << DRM_NODE_RENDER))
+              ? drm_dev->nodes[DRM_NODE_RENDER] : "(none)");
    fd = open(drm_dev->nodes[DRM_NODE_RENDER], O_RDWR | O_CLOEXEC);
    if (fd < 0) {
       mesa_logd("Failed to open render node: %s\n",
@@ -262,6 +269,8 @@ pvr_physical_device_enumerate(struct vk_instance *const vk_instance)
                                      instance,
                                      drm_render_device,
                                      drm_display_device);
+   fprintf(stderr, "PVRPORT enum: pdev_init -> %d (display=%s)\n", (int)result,
+           drm_display_device ? "yes" : "none");
    if (result != VK_SUCCESS) {
       if (result == VK_ERROR_INCOMPATIBLE_DRIVER)
          result = VK_SUCCESS;

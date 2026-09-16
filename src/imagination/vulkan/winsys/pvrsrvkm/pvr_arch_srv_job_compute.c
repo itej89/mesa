@@ -60,17 +60,17 @@ pvr_srv_compute_cmd_stream_load(struct rogue_fwif_cmd_compute *const cmd,
    stream_ptr += pvr_cmd_length(CR_CDM_CONTEXT_PDS1);
 
    if (PVR_HAS_FEATURE(dev_info, compute_morton_capable)) {
-      regs->cdm_item = *stream_ptr;
+      /* cdm_item: absent from this firmware's command. */
       stream_ptr += pvr_cmd_length(CR_CDM_ITEM);
    }
 
    if (PVR_HAS_FEATURE(dev_info, cluster_grouping)) {
-      regs->compute_cluster = *stream_ptr;
+      /* compute_cluster: absent from this firmware's command. */
       stream_ptr += pvr_cmd_length(CR_COMPUTE_CLUSTER);
    }
 
    if (PVR_HAS_FEATURE(dev_info, tpu_dm_global_registers)) {
-      regs->tpu_tag_cdm_ctrl = *stream_ptr;
+      /* tpu_tag_cdm_ctrl: absent from this firmware's command. */
       stream_ptr++;
    }
 
@@ -103,7 +103,10 @@ static void pvr_srv_compute_cmd_ext_stream_load(
 
    assert(PVR_HAS_QUIRK(dev_info, 49927) == header0.has_brn49927);
    if (header0.has_brn49927) {
-      regs->tpu = *ext_stream_ptr;
+      /* tpu: a BRN 49927 field, and this firmware command has no slot for it
+       * (see DDK119_CDM_LAYOUT). BXE-4-32 does not have the quirk, so this
+       * never runs here; keep the stream advance so parsing stays correct for
+       * a part that does. */
       ext_stream_ptr += pvr_cmd_length(CR_TPU);
    }
 

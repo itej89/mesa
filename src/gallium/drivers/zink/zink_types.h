@@ -1988,6 +1988,8 @@ struct zink_context {
    bool is_device_lost;
    bool primitive_restart;
    bool blitting : 1;
+   /* render output issued in this batch, in 16x16 tiles */
+   uint32_t render_tiles_this_batch;
    bool blit_scissor : 1;
    bool blit_nearest : 1;
    bool unordered_blitting : 1;

@@ -1,3 +1,4 @@
+#include <stdlib.h>
 /*
  * Copyright © 2022 Imagination Technologies Ltd.
  *
@@ -390,6 +391,16 @@ static VkResult pvr_process_compute_cmd(struct pvr_device *device,
    return result;
 }
 
+
+/* Experiment gate: see try-serialize-transfers.py. */
+static int pvr_tq_serialize(void)
+{
+   static int v = -1;
+   if (v < 0)
+      v = getenv("PVR_TQ_SERIALIZE") ? 1 : 0;
+   return v;
+}
+
 static VkResult pvr_process_transfer_cmds(struct pvr_device *device,
                                           struct pvr_queue *queue,
                                           struct pvr_sub_cmd_transfer *sub_cmd)
@@ -736,6 +747,16 @@ struct pvr_suspended_data {
    const struct pvr_query_pool *query_pool;
 };
 
+
+/* Experiment gate: see fix-serialize-renders.py. */
+static int pvr_serialize_renders(void)
+{
+   static int v = -1;
+   if (v < 0)
+      v = getenv("PVR_SERIALIZE_RENDERS") ? 1 : 0;
+   return v;
+}
+
 static VkResult pvr_process_cmd_buffer(struct pvr_device *device,
                                        struct pvr_queue *queue,
                                        struct pvr_cmd_buffer *cmd_buffer,
@@ -749,6 +770,21 @@ static VkResult pvr_process_cmd_buffer(struct pvr_device *device,
                              link) {
       switch (sub_cmd->type) {
       case PVR_SUB_CMD_TYPE_GRAPHICS: {
+         /* Overlapping one render's geometry with the previous render's
+          * fragment stage hangs the fragment stage when the two use different
+          * render-target datasets, so optionally serialise them.
+          */
+         if (pvr_serialize_renders()) {
+            struct pvr_sub_cmd_event_barrier serialise = {
+               .wait_for_stage_mask = PVR_PIPELINE_STAGE_FRAG_BIT,
+               .wait_at_stage_mask = PVR_PIPELINE_STAGE_GEOM_BIT,
+            };
+
+            result = pvr_process_event_cmd_barrier(device, queue, &serialise);
+            if (result != VK_SUCCESS)
+               break;
+         }
+
          /* If the fragment job utilizes queries, for data integrity
           * it needs to wait for the query to be processed.
           */
@@ -831,6 +867,20 @@ static VkResult pvr_process_cmd_buffer(struct pvr_device *device,
          }
 
          result = pvr_process_transfer_cmds(device, queue, &sub_cmd->transfer);
+
+         if (result == VK_SUCCESS && pvr_tq_serialize() &&
+             queue->last_job_signal_sync[PVR_JOB_TYPE_TRANSFER]) {
+            /* Drain this transfer before the next one is built, mirroring what
+             * a submit boundary does. */
+            VkResult wait_result =
+               vk_sync_wait(&device->vk,
+                            queue->last_job_signal_sync[PVR_JOB_TYPE_TRANSFER],
+                            0U,
+                            VK_SYNC_WAIT_COMPLETE,
+                            UINT64_MAX);
+            if (wait_result != VK_SUCCESS)
+               result = wait_result;
+         }
 
          if (serialize_with_frag) {
             struct pvr_sub_cmd_event_barrier barrier = {

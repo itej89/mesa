@@ -99,6 +99,20 @@ void pvr_arch_pbe_pack_state(
 
    pbe_reg_words[2] = 0;
 
+   /* Where a render's colour output actually goes. The GLES readback is
+    * black while the copy that reads the same image is correct, so the one
+    * thing left to check is whether the render and the copy agree on the
+    * address. */
+   if (getenv("PVR_SUBMIT_DEBUG")) {
+      fprintf(stderr,
+              "PVRPBE dst addr=0x%llx stride=%u layout=%d fmt=%d %ux%u\n",
+              (unsigned long long)surface_params->addr.addr,
+              surface_params->stride,
+              (int)surface_params->mem_layout,
+              (int)surface_params->source_format,
+              surface_params->width, surface_params->height);
+   }
+
    if (surface_params->z_only_render) {
       pbe_cs_words[0] = 0;
 
