@@ -24,6 +24,7 @@
 
 
 #include <stdio.h>
+#include <stdlib.h>
 #include "context.h"
 #include "draw_validate.h"
 
@@ -509,6 +510,46 @@ compute_version_es2(const struct gl_extensions *extensions,
                          extensions->OES_depth_texture_cube_map &&
                          extensions->EXT_texture_type_2_10_10_10_REV &&
                          consts->MaxColorAttachments >= 4);
+   if (getenv("MESA_ES3_GATE_DEBUG")) {
+      const struct { const char *name; bool ok; } es3_items[] = {
+         { "ARB_half_float_vertex", extensions->ARB_half_float_vertex },
+         { "ARB_internalformat_query", extensions->ARB_internalformat_query },
+         { "ARB_map_buffer_range", extensions->ARB_map_buffer_range },
+         { "ARB_shader_texture_lod", extensions->ARB_shader_texture_lod },
+         { "OES_texture_float", extensions->OES_texture_float },
+         { "OES_texture_half_float", extensions->OES_texture_half_float },
+         { "OES_texture_half_float_linear", extensions->OES_texture_half_float_linear },
+         { "ARB_texture_rg", extensions->ARB_texture_rg },
+         { "ARB_depth_buffer_float", extensions->ARB_depth_buffer_float },
+         { "ARB_framebuffer_object", extensions->ARB_framebuffer_object },
+         { "EXT_sRGB", extensions->EXT_sRGB },
+         { "EXT_packed_float", extensions->EXT_packed_float },
+         { "EXT_texture_array", extensions->EXT_texture_array },
+         { "EXT_texture_shared_exponent", extensions->EXT_texture_shared_exponent },
+         { "EXT_texture_sRGB", extensions->EXT_texture_sRGB },
+         { "EXT_transform_feedback", extensions->EXT_transform_feedback },
+         { "ARB_draw_instanced", extensions->ARB_draw_instanced },
+         { "ARB_instanced_arrays", extensions->ARB_instanced_arrays },
+         { "ARB_uniform_buffer_object", extensions->ARB_uniform_buffer_object },
+         { "EXT_texture_snorm", extensions->EXT_texture_snorm },
+         { "NV_primitive_restart||PrimitiveRestartFixedIndex",
+           extensions->NV_primitive_restart || consts->PrimitiveRestartFixedIndex },
+         { "OES_depth_texture_cube_map", extensions->OES_depth_texture_cube_map },
+         { "EXT_texture_type_2_10_10_10_REV", extensions->EXT_texture_type_2_10_10_10_REV },
+         { "MaxColorAttachments>=4", consts->MaxColorAttachments >= 4 },
+      };
+      unsigned missing = 0;
+
+      for (unsigned i = 0; i < ARRAY_SIZE(es3_items); i++) {
+         if (!es3_items[i].ok) {
+            fprintf(stderr, "ES3 GATE: missing %s\n", es3_items[i].name);
+            missing++;
+         }
+      }
+      fprintf(stderr, "ES3 GATE: %u of %u ES 3.0 items missing (MaxColorAttachments=%u)\n",
+              missing, (unsigned)ARRAY_SIZE(es3_items), consts->MaxColorAttachments);
+   }
+
    const bool es31_compute_shader =
       consts->MaxComputeWorkGroupInvocations >= 128 &&
       consts->Program[MESA_SHADER_COMPUTE].MaxShaderStorageBlocks &&
