@@ -70,7 +70,14 @@ static nir_def *get_is_null(nir_builder *b,
       }
 
       nir_src *index = nir_get_io_index_src(intr);
-      assert(index || is_deref);
+
+      /* The global intrinsics address memory directly: there is no
+       * descriptor to be null. Dereferencing the missing index crashed as
+       * soon as a shader used them with nullDescriptor enabled, which zink
+       * does and the transform feedback lowering triggers.
+       */
+      if (!index && !is_deref)
+         return NULL;
 
       if (nir_intrinsic_infos[intr->intrinsic].has_dest)
          *def = &intr->def;

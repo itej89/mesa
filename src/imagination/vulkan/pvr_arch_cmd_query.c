@@ -4,12 +4,73 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "pvr_device.h"
+#include "pvr_buffer.h"
 #include "pvr_cmd_buffer.h"
 #include "pvr_entrypoints.h"
 #include "pvr_hw_pass.h"
 #include "pvr_macros.h"
 #include "pvr_pass.h"
 #include "pvr_query.h"
+#include "util/log.h"
+
+/* VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT: counted on the CPU (see
+ * pvr_xfb.h), so results are copied on the CPU too.
+ */
+static void pvr_xfb_copy_query_results(struct pvr_cmd_buffer *cmd_buffer,
+                                       const struct pvr_query_pool *pool,
+                                       uint32_t first_query,
+                                       uint32_t query_count,
+                                       VkBuffer dst_buffer,
+                                       VkDeviceSize dst_offset,
+                                       VkDeviceSize stride,
+                                       VkQueryResultFlags flags)
+{
+   VK_FROM_HANDLE(pvr_buffer, buffer, dst_buffer);
+   struct pvr_device *device = cmd_buffer->device;
+   struct pvr_winsys_bo *bo = buffer->vma ? buffer->vma->bo : NULL;
+   const bool is_64 = flags & VK_QUERY_RESULT_64_BIT;
+   bool unmap = false;
+
+   if (!bo)
+      return;
+
+   if (!bo->map) {
+      if (device->ws->ops->buffer_map(bo, NULL) != VK_SUCCESS) {
+         mesa_loge("transform feedback query: cannot map result buffer");
+         return;
+      }
+      unmap = true;
+   }
+
+   uint8_t *out = (uint8_t *)bo->map + buffer->vma->bo_offset + dst_offset;
+
+   for (uint32_t i = 0; i < query_count; i++) {
+      const struct pvr_xfb_query_result *r =
+         &pool->xfb_results[first_query + i];
+      const uint64_t values[3] = {
+         r->primitives_generated,
+         r->primitives_written,
+         r->available,
+      };
+      const unsigned count =
+         (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) ? 3 : 2;
+
+      for (unsigned v = 0; v < count; v++) {
+         if (is_64) {
+            memcpy(out + v * 8, &values[v], 8);
+         } else {
+            const uint32_t v32 = values[v];
+            memcpy(out + v * 4, &v32, 4);
+         }
+      }
+
+      out += stride;
+   }
+
+   if (unmap)
+      device->ws->ops->buffer_unmap(bo, false);
+}
 
 void PVR_PER_ARCH(CmdResetQueryPool)(VkCommandBuffer commandBuffer,
                                      VkQueryPool queryPool,
@@ -24,6 +85,18 @@ void PVR_PER_ARCH(CmdResetQueryPool)(VkCommandBuffer commandBuffer,
 
    if (queryCount == 0)
       return;
+
+   {
+      VK_FROM_HANDLE(pvr_query_pool, pool, queryPool);
+
+      /* Counted on the CPU at record time; reset the same way. */
+      if (pool->xfb_results) {
+         memset(pool->xfb_results + firstQuery,
+                0,
+                sizeof(*pool->xfb_results) * queryCount);
+         return;
+      }
+   }
 
    query_info.type = PVR_QUERY_TYPE_RESET_QUERY_POOL;
 
@@ -86,6 +159,26 @@ void PVR_PER_ARCH(CmdCopyQueryPoolResults)(VkCommandBuffer commandBuffer,
 
    if (queryCount == 0)
       return;
+
+   {
+      VK_FROM_HANDLE(pvr_query_pool, pool, queryPool);
+
+      /* The counts are final once the query's End is recorded, which the
+       * spec requires before this call, so the copy is done here. zink
+       * reads GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN this way.
+       */
+      if (pool->xfb_results) {
+         pvr_xfb_copy_query_results(cmd_buffer,
+                                    pool,
+                                    firstQuery,
+                                    queryCount,
+                                    dstBuffer,
+                                    dstOffset,
+                                    stride,
+                                    flags);
+         return;
+      }
+   }
 
    query_info.type = PVR_QUERY_TYPE_COPY_QUERY_RESULTS;
 
@@ -173,6 +266,13 @@ void PVR_PER_ARCH(CmdBeginQuery)(VkCommandBuffer commandBuffer,
 
    PVR_CHECK_COMMAND_BUFFER_BUILDING_STATE(cmd_buffer);
 
+   if (pool->xfb_results) {
+      pool->xfb_results[query] = (struct pvr_xfb_query_result){ 0 };
+      state->xfb.query_pool = pool;
+      state->xfb.query = query;
+      return;
+   }
+
    /* Occlusion queries can't be nested. */
    assert(!state->vis_test_enabled);
 
@@ -223,9 +323,40 @@ void PVR_PER_ARCH(CmdEndQuery)(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(pvr_cmd_buffer, cmd_buffer, commandBuffer);
    struct pvr_cmd_buffer_state *state = &cmd_buffer->state;
+   VK_FROM_HANDLE(pvr_query_pool, pool, queryPool);
 
    PVR_CHECK_COMMAND_BUFFER_BUILDING_STATE(cmd_buffer);
 
+   if (pool->xfb_results) {
+      /* The counts are final once recorded. Results are read after the
+       * command buffer has run, which is how zink uses them.
+       */
+      pool->xfb_results[query].available = true;
+      if (state->xfb.query_pool == pool && state->xfb.query == query)
+         state->xfb.query_pool = NULL;
+      return;
+   }
+
    state->vis_test_enabled = false;
    state->dirty.vis_test = true;
+}
+
+/* VK_EXT_transform_feedback: indexed queries. Only stream/index 0 exists. */
+void PVR_PER_ARCH(CmdBeginQueryIndexedEXT)(VkCommandBuffer commandBuffer,
+                                           VkQueryPool queryPool,
+                                           uint32_t query,
+                                           VkQueryControlFlags flags,
+                                           uint32_t index)
+{
+   assert(index == 0);
+   PVR_PER_ARCH(CmdBeginQuery)(commandBuffer, queryPool, query, flags);
+}
+
+void PVR_PER_ARCH(CmdEndQueryIndexedEXT)(VkCommandBuffer commandBuffer,
+                                         VkQueryPool queryPool,
+                                         uint32_t query,
+                                         uint32_t index)
+{
+   assert(index == 0);
+   PVR_PER_ARCH(CmdEndQuery)(commandBuffer, queryPool, query);
 }

@@ -21,6 +21,7 @@
 #include "pvr_job_render.h"
 #include "pvr_hw_pass.h"
 #include "pvr_types.h"
+#include "pvr_xfb.h"
 
 struct pvr_pds_upload;
 struct pvr_private_compute_pipeline;
@@ -417,10 +418,34 @@ struct pvr_cmd_buffer_draw_state {
 };
 
 struct pvr_push_constants {
-   uint8_t data[PVR_MAX_PUSH_CONSTANTS_SIZE];
+   /* The application's push constants, then the driver's transform
+    * feedback block (vertex stage only; see pvr_xfb.h).
+    */
+   uint8_t data[PVR_PUSH_CONSTANTS_STORAGE_SIZE];
    unsigned bytes_updated;
    pvr_dev_addr_t dev_addr;
    bool dirty;
+};
+
+/* VK_EXT_transform_feedback command buffer state. */
+struct pvr_xfb_state {
+   struct {
+      struct pvr_buffer *buffer;
+      VkDeviceSize offset;
+      VkDeviceSize size;
+   } bindings[PVR_XFB_MAX_BUFFERS];
+
+   /* Bytes captured into each binding so far, counted on the CPU: loaded
+    * from the counter buffers at Begin, stored back at End.
+    */
+   VkDeviceSize written[PVR_XFB_MAX_BUFFERS];
+
+   bool active;
+   bool warned_uncapturable;
+
+   /* Active VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT query, if any. */
+   struct pvr_query_pool *query_pool;
+   uint32_t query;
 };
 
 struct pvr_cmd_buffer_state {
@@ -438,6 +463,8 @@ struct pvr_cmd_buffer_state {
    struct ROGUE_TA_STATE_HEADER emit_header;
 
    struct pvr_vertex_binding vertex_bindings[PVR_MAX_VERTEX_INPUT_BINDINGS];
+
+   struct pvr_xfb_state xfb;
 
    struct {
       struct pvr_buffer *buffer;

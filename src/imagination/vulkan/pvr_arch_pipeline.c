@@ -24,6 +24,7 @@
  * SOFTWARE.
  */
 
+#include "pvr_xfb.h"
 #include "pvr_pipeline.h"
 
 #include <assert.h>
@@ -2589,6 +2590,12 @@ static void pvr_setup_descriptors(pco_data *data,
          count = count / 4;
       }
 
+      /* VK_EXT_transform_feedback: the driver block after the
+       * application's push constants must be loaded too.
+       */
+      if (stage == MESA_SHADER_VERTEX && data->vs.xfb_buffers)
+         count = MAX2(count, PVR_PUSH_CONSTANTS_STORAGE_SIZE / 4);
+
       data->common.push_consts.range = (pco_range){
          .start = data->common.shareds,
          .count = count,
@@ -2914,6 +2921,16 @@ pvr_graphics_pipeline_compile(struct pvr_device *const device,
       pvr_early_init_shader_data(&shader_data[stage],
                                  nir_shaders[stage],
                                  pCreateInfo);
+
+      /* VK_EXT_transform_feedback: before linking can drop captured
+       * outputs the fragment shader does not read.
+       */
+      if (stage == MESA_SHADER_VERTEX) {
+         pvr_nir_lower_xfb(nir_shaders[stage],
+                           &shader_data[stage].vs.xfb_buffers,
+                           shader_data[stage].vs.xfb_strides);
+      }
+
       pco_preprocess_nir(pco_ctx, nir_shaders[stage]);
    }
 
@@ -2986,6 +3003,13 @@ pvr_graphics_pipeline_compile(struct pvr_device *const device,
 
    if (!pCreateInfo->renderPass)
       pvr_arch_destroy_mrt_setup(device, &mrt_setup);
+
+   /* VK_EXT_transform_feedback: the vertex shader writes memory, so every
+    * vertex has to run -- in particular, degenerate primitives must not be
+    * culled before the vertex shader.
+    */
+   if (shader_data[MESA_SHADER_VERTEX].vs.xfb_buffers)
+      shader_data[MESA_SHADER_VERTEX].common.uses.side_effects = true;
 
    for (mesa_shader_stage stage = 0; stage < MESA_SHADER_STAGES; ++stage) {
       pco_shader **pco = &pco_shaders[stage];

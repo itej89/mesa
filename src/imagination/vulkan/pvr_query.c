@@ -66,14 +66,35 @@ VkResult pvr_CreateQueryPool(VkDevice _device,
     * VkPhysicalDeviceFeatures->pipelineStatisticsQuery = false.
     */
    assert(!device->vk.enabled_features.pipelineStatisticsQuery);
-   assert(pCreateInfo->queryType == VK_QUERY_TYPE_OCCLUSION);
+   assert(pCreateInfo->queryType == VK_QUERY_TYPE_OCCLUSION ||
+          pCreateInfo->queryType ==
+             VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT);
 
-   pool = vk_object_alloc(&device->vk,
-                          pAllocator,
-                          sizeof(*pool),
-                          VK_OBJECT_TYPE_QUERY_POOL);
+   pool = vk_object_zalloc(&device->vk,
+                           pAllocator,
+                           sizeof(*pool),
+                           VK_OBJECT_TYPE_QUERY_POOL);
    if (!pool)
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+   pool->type = pCreateInfo->queryType;
+   pool->query_count = pCreateInfo->queryCount;
+
+   if (pool->type == VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT) {
+      pool->xfb_results =
+         vk_zalloc2(&device->vk.alloc,
+                    pAllocator,
+                    sizeof(*pool->xfb_results) * pCreateInfo->queryCount,
+                    8,
+                    VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      if (!pool->xfb_results) {
+         vk_object_free(&device->vk, pAllocator, pool);
+         return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+      }
+
+      *pQueryPool = pvr_query_pool_to_handle(pool);
+      return VK_SUCCESS;
+   }
 
    pool->result_stride = ALIGN_POT(query_size, ROGUE_OQUERY_ALIGN);
 
@@ -122,6 +143,12 @@ void pvr_DestroyQueryPool(VkDevice _device,
 
    if (!pool)
       return;
+
+   if (pool->xfb_results) {
+      vk_free2(&device->vk.alloc, pAllocator, pool->xfb_results);
+      vk_object_free(&device->vk, pAllocator, pool);
+      return;
+   }
 
    pvr_bo_suballoc_free(pool->availability_buffer);
    pvr_bo_suballoc_free(pool->result_buffer);
@@ -205,6 +232,31 @@ VkResult pvr_GetQueryPoolResults(VkDevice _device,
 {
    VK_FROM_HANDLE(pvr_query_pool, pool, queryPool);
    VK_FROM_HANDLE(pvr_device, device, _device);
+
+   if (pool->xfb_results) {
+      uint8_t *out = pData;
+      VkResult xfb_result = VK_SUCCESS;
+
+      for (uint32_t i = 0; i < queryCount; i++) {
+         const struct pvr_xfb_query_result *r =
+            &pool->xfb_results[firstQuery + i];
+
+         if (r->available || (flags & VK_QUERY_RESULT_PARTIAL_BIT)) {
+            pvr_write_query_to_buffer(out, flags, 0, r->primitives_generated);
+            pvr_write_query_to_buffer(out, flags, 1, r->primitives_written);
+         } else {
+            xfb_result = VK_NOT_READY;
+         }
+
+         if (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT)
+            pvr_write_query_to_buffer(out, flags, 2, r->available);
+
+         out += stride;
+      }
+
+      return xfb_result;
+   }
+
    VG(volatile uint32_t *available =
          pvr_bo_suballoc_get_map_addr(pool->availability_buffer));
    volatile uint32_t *query_results =
@@ -272,6 +324,14 @@ void pvr_ResetQueryPool(VkDevice _device,
                         uint32_t queryCount)
 {
    VK_FROM_HANDLE(pvr_query_pool, pool, queryPool);
+
+   if (pool->xfb_results) {
+      memset(pool->xfb_results + firstQuery,
+             0,
+             sizeof(*pool->xfb_results) * queryCount);
+      return;
+   }
+
    uint32_t *availability =
       pvr_bo_suballoc_get_map_addr(pool->availability_buffer);
 

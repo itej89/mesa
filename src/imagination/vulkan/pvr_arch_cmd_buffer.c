@@ -8682,6 +8682,295 @@ static void pvr_emit_vdm_index_list(struct pvr_cmd_buffer *cmd_buffer,
    pvr_csb_clear_relocation_mark(csb);
 }
 
+
+/* ------------------------------------------------------------------------
+ * VK_EXT_transform_feedback. See pvr_xfb.h.
+ * ------------------------------------------------------------------------ */
+
+/* CPU view of a buffer's memory, for the 4-byte counters. All memory on this
+ * device is host visible. *unmap says whether the caller must unmap again.
+ */
+static uint8_t *pvr_xfb_buffer_cpu_addr(struct pvr_device *device,
+                                        struct pvr_buffer *buffer,
+                                        VkDeviceSize offset,
+                                        bool *unmap)
+{
+   struct pvr_winsys_bo *bo = buffer->vma ? buffer->vma->bo : NULL;
+
+   *unmap = false;
+   if (!bo)
+      return NULL;
+
+   if (!bo->map) {
+      if (device->ws->ops->buffer_map(bo, NULL) != VK_SUCCESS)
+         return NULL;
+      *unmap = true;
+   }
+
+   return (uint8_t *)bo->map + buffer->vma->bo_offset + offset;
+}
+
+static void pvr_xfb_buffer_cpu_done(struct pvr_device *device,
+                                    struct pvr_buffer *buffer,
+                                    bool unmap)
+{
+   if (unmap)
+      device->ws->ops->buffer_unmap(buffer->vma->bo, false);
+}
+
+static uint32_t pvr_xfb_prim_count(VkPrimitiveTopology topology, uint32_t n)
+{
+   switch (topology) {
+   case VK_PRIMITIVE_TOPOLOGY_POINT_LIST:
+      return n;
+   case VK_PRIMITIVE_TOPOLOGY_LINE_LIST:
+      return n / 2;
+   case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP:
+      return n >= 2 ? n - 1 : 0;
+   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:
+      return n / 3;
+   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:
+   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN:
+      return n >= 3 ? n - 2 : 0;
+   case VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY:
+      return n / 4;
+   case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY:
+      return n >= 4 ? n - 3 : 0;
+   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY:
+      return n / 6;
+   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY:
+      return n >= 6 ? (n - 4) / 2 : 0;
+   default:
+      return 0;
+   }
+}
+
+/* Refresh the driver block the vertex shader reads its capture target from.
+ * Capture only happens for a non-indexed, direct draw (capturable), which is
+ * the only kind GLES allows while transform feedback is active.
+ */
+static void pvr_xfb_setup_draw(struct pvr_cmd_buffer *const cmd_buffer,
+                               uint32_t first_vertex,
+                               uint32_t vertex_count,
+                               uint32_t first_instance,
+                               bool capturable)
+{
+   struct pvr_cmd_buffer_state *const state = &cmd_buffer->state;
+   const struct pvr_graphics_pipeline *const gfx_pipeline =
+      state->gfx_pipeline;
+   struct pvr_xfb_state *const xfb = &state->xfb;
+   struct pvr_push_constants *const push_consts =
+      &state->push_consts[PVR_STAGE_ALLOCATION_VERTEX_GEOMETRY];
+   uint32_t block[PVR_XFB_PUSH_DWORDS] = { 0 };
+
+   if (!gfx_pipeline || !gfx_pipeline->vs_data.vs.xfb_buffers)
+      return;
+
+   const pco_vs_data *const vs = &gfx_pipeline->vs_data.vs;
+
+   if (xfb->active && !capturable && !xfb->warned_uncapturable) {
+      mesa_logw("transform feedback: indexed and indirect draws are not "
+                "captured");
+      xfb->warned_uncapturable = true;
+   }
+
+   if (xfb->active && capturable) {
+      block[PVR_XFB_PUSH_FIRST_VERTEX] = first_vertex;
+      block[PVR_XFB_PUSH_VERTEX_COUNT] = vertex_count;
+      block[PVR_XFB_PUSH_FIRST_INSTANCE] = first_instance;
+
+      u_foreach_bit (b, vs->xfb_buffers) {
+         const struct pvr_buffer *const buffer = xfb->bindings[b].buffer;
+         const VkDeviceSize size = xfb->bindings[b].size;
+         const uint32_t stride = vs->xfb_strides[b];
+
+         if (!buffer || !stride || xfb->written[b] >= size)
+            continue;
+
+         const uint64_t addr =
+            buffer->dev_addr.addr + xfb->bindings[b].offset + xfb->written[b];
+         const VkDeviceSize records = (size - xfb->written[b]) / stride;
+
+         block[PVR_XFB_PUSH_BUFFER(b, PVR_XFB_BUF_ADDR_LO)] = (uint32_t)addr;
+         block[PVR_XFB_PUSH_BUFFER(b, PVR_XFB_BUF_ADDR_HI)] = addr >> 32;
+         block[PVR_XFB_PUSH_BUFFER(b, PVR_XFB_BUF_LIMIT)] =
+            MIN2(records, UINT32_MAX / stride);
+      }
+   }
+
+   if (push_consts->dev_addr.addr &&
+       !memcmp(&push_consts->data[PVR_XFB_PUSH_OFFSET], block, sizeof(block))) {
+      return;
+   }
+
+   memcpy(&push_consts->data[PVR_XFB_PUSH_OFFSET], block, sizeof(block));
+   push_consts->bytes_updated = sizeof(push_consts->data);
+   push_consts->dirty = true;
+}
+
+/* Advance the CPU-side byte counts and the active query after a draw. */
+static void pvr_xfb_account_draw(struct pvr_cmd_buffer *const cmd_buffer,
+                                 VkPrimitiveTopology topology,
+                                 uint32_t vertex_count,
+                                 uint32_t instance_count,
+                                 bool capturable)
+{
+   struct pvr_cmd_buffer_state *const state = &cmd_buffer->state;
+   const struct pvr_graphics_pipeline *const gfx_pipeline =
+      state->gfx_pipeline;
+   struct pvr_xfb_state *const xfb = &state->xfb;
+   const uint64_t prims =
+      (uint64_t)pvr_xfb_prim_count(topology, vertex_count) * instance_count;
+   const uint64_t vertices = (uint64_t)vertex_count * instance_count;
+   uint64_t captured = 0;
+
+   if (xfb->active && capturable && gfx_pipeline &&
+       gfx_pipeline->vs_data.vs.xfb_buffers) {
+      const pco_vs_data *const vs = &gfx_pipeline->vs_data.vs;
+
+      captured = vertices;
+      u_foreach_bit (b, vs->xfb_buffers) {
+         const uint32_t stride = vs->xfb_strides[b];
+         const VkDeviceSize size = xfb->bindings[b].size;
+         uint64_t n = 0;
+
+         if (xfb->bindings[b].buffer && stride && xfb->written[b] < size)
+            n = MIN2(vertices, (size - xfb->written[b]) / stride);
+
+         xfb->written[b] += n * stride;
+         captured = MIN2(captured, n);
+      }
+   }
+
+   if (xfb->query_pool) {
+      struct pvr_xfb_query_result *const r =
+         &xfb->query_pool->xfb_results[xfb->query];
+
+      r->primitives_generated += prims;
+      if (captured == vertices)
+         r->primitives_written += captured ? prims : 0;
+      else
+         r->primitives_written += pvr_xfb_prim_count(topology, captured);
+   }
+}
+
+static void pvr_xfb_counters(struct pvr_cmd_buffer *cmd_buffer,
+                             uint32_t first,
+                             uint32_t count,
+                             const VkBuffer *buffers,
+                             const VkDeviceSize *offsets,
+                             bool store)
+{
+   struct pvr_xfb_state *const xfb = &cmd_buffer->state.xfb;
+   struct pvr_device *const device = cmd_buffer->device;
+
+   for (uint32_t i = 0; i < count; i++) {
+      const uint32_t idx = first + i;
+
+      if (idx >= PVR_XFB_MAX_BUFFERS)
+         break;
+
+      if (!store)
+         xfb->written[idx] = 0;
+
+      if (!buffers || buffers[i] == VK_NULL_HANDLE)
+         continue;
+
+      VK_FROM_HANDLE(pvr_buffer, counter, buffers[i]);
+      const VkDeviceSize offset = offsets ? offsets[i] : 0;
+      bool unmap;
+      uint8_t *ptr =
+         pvr_xfb_buffer_cpu_addr(device, counter, offset, &unmap);
+
+      if (!ptr) {
+         mesa_loge("transform feedback: cannot map counter buffer");
+         continue;
+      }
+
+      if (store) {
+         const uint32_t bytes = MIN2(xfb->written[idx], UINT32_MAX);
+         memcpy(ptr, &bytes, sizeof(bytes));
+      } else {
+         uint32_t bytes;
+         memcpy(&bytes, ptr, sizeof(bytes));
+         xfb->written[idx] = bytes;
+      }
+
+      pvr_xfb_buffer_cpu_done(device, counter, unmap);
+   }
+}
+
+void PVR_PER_ARCH(CmdBindTransformFeedbackBuffersEXT)(
+   VkCommandBuffer commandBuffer,
+   uint32_t firstBinding,
+   uint32_t bindingCount,
+   const VkBuffer *pBuffers,
+   const VkDeviceSize *pOffsets,
+   const VkDeviceSize *pSizes)
+{
+   VK_FROM_HANDLE(pvr_cmd_buffer, cmd_buffer, commandBuffer);
+   struct pvr_xfb_state *const xfb = &cmd_buffer->state.xfb;
+
+   PVR_CHECK_COMMAND_BUFFER_BUILDING_STATE(cmd_buffer);
+   assert(firstBinding + bindingCount <= PVR_XFB_MAX_BUFFERS);
+
+   for (uint32_t i = 0; i < bindingCount; i++) {
+      const uint32_t idx = firstBinding + i;
+      VK_FROM_HANDLE(pvr_buffer, buffer, pBuffers[i]);
+
+      xfb->bindings[idx].buffer = buffer;
+      xfb->bindings[idx].offset = pOffsets[i];
+      xfb->bindings[idx].size =
+         vk_buffer_range(&buffer->vk,
+                         pOffsets[i],
+                         pSizes ? pSizes[i] : VK_WHOLE_SIZE);
+   }
+}
+
+void PVR_PER_ARCH(CmdBeginTransformFeedbackEXT)(
+   VkCommandBuffer commandBuffer,
+   uint32_t firstCounterBuffer,
+   uint32_t counterBufferCount,
+   const VkBuffer *pCounterBuffers,
+   const VkDeviceSize *pCounterBufferOffsets)
+{
+   VK_FROM_HANDLE(pvr_cmd_buffer, cmd_buffer, commandBuffer);
+   struct pvr_xfb_state *const xfb = &cmd_buffer->state.xfb;
+
+   PVR_CHECK_COMMAND_BUFFER_BUILDING_STATE(cmd_buffer);
+
+   /* Buffers without a counter start from the beginning. */
+   memset(xfb->written, 0, sizeof(xfb->written));
+   pvr_xfb_counters(cmd_buffer,
+                    firstCounterBuffer,
+                    counterBufferCount,
+                    pCounterBuffers,
+                    pCounterBufferOffsets,
+                    false);
+   xfb->active = true;
+}
+
+void PVR_PER_ARCH(CmdEndTransformFeedbackEXT)(
+   VkCommandBuffer commandBuffer,
+   uint32_t firstCounterBuffer,
+   uint32_t counterBufferCount,
+   const VkBuffer *pCounterBuffers,
+   const VkDeviceSize *pCounterBufferOffsets)
+{
+   VK_FROM_HANDLE(pvr_cmd_buffer, cmd_buffer, commandBuffer);
+   struct pvr_xfb_state *const xfb = &cmd_buffer->state.xfb;
+
+   PVR_CHECK_COMMAND_BUFFER_BUILDING_STATE(cmd_buffer);
+
+   pvr_xfb_counters(cmd_buffer,
+                    firstCounterBuffer,
+                    counterBufferCount,
+                    pCounterBuffers,
+                    pCounterBufferOffsets,
+                    true);
+   xfb->active = false;
+}
+
 void PVR_PER_ARCH(CmdDraw)(VkCommandBuffer commandBuffer,
                            uint32_t vertexCount,
                            uint32_t instanceCount,
@@ -8702,6 +8991,11 @@ void PVR_PER_ARCH(CmdDraw)(VkCommandBuffer commandBuffer,
    PVR_CHECK_COMMAND_BUFFER_BUILDING_STATE(cmd_buffer);
 
    pvr_update_draw_state(state, &draw_state);
+   pvr_xfb_setup_draw(cmd_buffer,
+                      firstVertex,
+                      vertexCount,
+                      firstInstance,
+                      true);
 
    result = pvr_validate_draw_state(cmd_buffer);
    if (result != VK_SUCCESS)
@@ -8719,6 +9013,12 @@ void PVR_PER_ARCH(CmdDraw)(VkCommandBuffer commandBuffer,
                            0U,
                            0U,
                            0U);
+
+   pvr_xfb_account_draw(cmd_buffer,
+                        dynamic_state->ia.primitive_topology,
+                        vertexCount,
+                        instanceCount,
+                        true);
 }
 
 void PVR_PER_ARCH(CmdDrawIndexed)(VkCommandBuffer commandBuffer,
@@ -8743,6 +9043,7 @@ void PVR_PER_ARCH(CmdDrawIndexed)(VkCommandBuffer commandBuffer,
    PVR_CHECK_COMMAND_BUFFER_BUILDING_STATE(cmd_buffer);
 
    pvr_update_draw_state(state, &draw_state);
+   pvr_xfb_setup_draw(cmd_buffer, 0, 0, 0, false);
 
    result = pvr_validate_draw_state(cmd_buffer);
    if (result != VK_SUCCESS)
@@ -8760,6 +9061,12 @@ void PVR_PER_ARCH(CmdDrawIndexed)(VkCommandBuffer commandBuffer,
                            0U,
                            0U,
                            0U);
+
+   pvr_xfb_account_draw(cmd_buffer,
+                        dynamic_state->ia.primitive_topology,
+                        indexCount,
+                        instanceCount,
+                        false);
 }
 
 void PVR_PER_ARCH(CmdDrawIndexedIndirect)(VkCommandBuffer commandBuffer,
@@ -8783,6 +9090,7 @@ void PVR_PER_ARCH(CmdDrawIndexedIndirect)(VkCommandBuffer commandBuffer,
    PVR_CHECK_COMMAND_BUFFER_BUILDING_STATE(cmd_buffer);
 
    pvr_update_draw_state(state, &draw_state);
+   pvr_xfb_setup_draw(cmd_buffer, 0, 0, 0, false);
 
    result = pvr_validate_draw_state(cmd_buffer);
    if (result != VK_SUCCESS)
@@ -8822,6 +9130,7 @@ void PVR_PER_ARCH(CmdDrawIndirect)(VkCommandBuffer commandBuffer,
    PVR_CHECK_COMMAND_BUFFER_BUILDING_STATE(cmd_buffer);
 
    pvr_update_draw_state(state, &draw_state);
+   pvr_xfb_setup_draw(cmd_buffer, 0, 0, 0, false);
 
    result = pvr_validate_draw_state(cmd_buffer);
    if (result != VK_SUCCESS)

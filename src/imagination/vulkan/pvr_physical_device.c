@@ -12,6 +12,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "pvr_xfb.h"
 #include "pvr_physical_device.h"
 
 #include <sys/sysmacros.h>
@@ -204,6 +205,7 @@ static void pvr_physical_device_get_supported_extensions(
       .EXT_shader_replicated_composites = true,
       .EXT_texel_buffer_alignment = false,
       .EXT_tooling_info = true,
+      .EXT_transform_feedback = true,
       .EXT_vertex_attribute_divisor = true,
       .EXT_zero_initialize_device_memory = true,
    };
@@ -214,6 +216,10 @@ static void pvr_physical_device_get_supported_features(
    struct vk_features *const features)
 {
    *features = (struct vk_features){
+      /* VK_EXT_transform_feedback: stream 0 only. */
+      .transformFeedback = true,
+      .geometryStreams = false,
+
       /* Vulkan 1.0 */
       .robustBufferAccess = true,
       .fullDrawIndexUint32 = true,
@@ -558,6 +564,20 @@ static bool pvr_physical_device_get_properties(
       PVR_HAS_FEATURE(dev_info, simple_internal_parameter_format) ? 4U : 8U;
 
    *properties = (struct vk_properties){
+      /* VK_EXT_transform_feedback. Captured by the vertex shader,
+       * counted on the CPU (see pvr_xfb.h).
+       */
+      .maxTransformFeedbackStreams = 1,
+      .maxTransformFeedbackBuffers = PVR_XFB_MAX_BUFFERS,
+      .maxTransformFeedbackBufferSize = UINT32_MAX,
+      .maxTransformFeedbackStreamDataSize = 512,
+      .maxTransformFeedbackBufferDataSize = 512,
+      .maxTransformFeedbackBufferDataStride = 512,
+      .transformFeedbackQueries = true,
+      .transformFeedbackStreamsLinesTriangles = false,
+      .transformFeedbackRasterizationStreamSelect = false,
+      .transformFeedbackDraw = false,
+
       /* Vulkan 1.0 */
       .apiVersion = get_api_version(),
       .driverVersion = vk_get_driver_version(),

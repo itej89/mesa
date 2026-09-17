@@ -20,8 +20,22 @@
 
 struct pvr_device;
 
+/* One VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT result. */
+struct pvr_xfb_query_result {
+   uint64_t primitives_generated;
+   uint64_t primitives_written;
+   bool available;
+};
+
 struct pvr_query_pool {
    struct vk_object_base base;
+
+   VkQueryType type;
+
+   /* VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT pools are counted on the
+    * CPU while recording (see pvr_xfb.h) and have no GPU buffers.
+    */
+   struct pvr_xfb_query_result *xfb_results;
 
    /* Stride of result_buffer to get to the start of the results for the next
     * Phantom.
