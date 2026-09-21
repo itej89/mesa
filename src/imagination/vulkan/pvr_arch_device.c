@@ -10,6 +10,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "pvr_rt_dataset.h"
 #include "pvr_device.h"
 
 #include "vk_log.h"
@@ -852,6 +853,10 @@ VkResult PVR_PER_ARCH(create_device)(struct pvr_physical_device *pdevice,
    simple_mtx_init(&device->rs_mtx, mtx_plain);
    list_inithead(&device->render_states);
 
+   simple_mtx_init(&device->rt_pool_mtx, mtx_plain);
+   list_inithead(&device->rt_dataset_pool);
+   device->rt_pool_count = 0;
+
    *pDevice = pvr_device_to_handle(device);
 
    return VK_SUCCESS;
@@ -935,6 +940,12 @@ void PVR_PER_ARCH(destroy_device)(struct pvr_device *device,
       vk_free(&device->vk.alloc, rstate);
    }
    simple_mtx_unlock(&device->rs_mtx);
+   /* After the render states above, so anything they returned to the pool is
+    * destroyed here rather than leaked.
+    */
+   pvr_rt_dataset_pool_finish(device);
+   simple_mtx_destroy(&device->rt_pool_mtx);
+
    simple_mtx_destroy(&device->rs_mtx);
 
    pvr_arch_border_color_table_finish(device);

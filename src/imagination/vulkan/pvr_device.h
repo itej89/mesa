@@ -146,6 +146,14 @@ struct pvr_device {
 
    simple_mtx_t rs_mtx;
    struct list_head render_states;
+
+   /* Idle render-target datasets, kept for reuse rather than destroyed. See
+    * pvr_rt_dataset_pool_take(). Per-device, so nothing is shared between
+    * processes.
+    */
+   simple_mtx_t rt_pool_mtx;
+   struct list_head rt_dataset_pool;
+   uint32_t rt_pool_count;
 };
 
 struct pvr_device_memory {

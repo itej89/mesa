@@ -24,6 +24,11 @@ struct pvr_winsys_rt_dataset;
 struct pvr_rt_dataset {
    struct pvr_device *device;
 
+   /* Links this dataset into device->rt_dataset_pool while it is idle. Unused
+    * while a render state owns it.
+    */
+   struct list_head pool_link;
+
    /* RT dataset information */
    uint32_t width;
    uint32_t height;
@@ -70,14 +75,34 @@ void pvr_rt_vheap_rtc_data_fini(struct pvr_rt_dataset *rt_dataset);
 
 void pvr_render_target_dataset_destroy(struct pvr_rt_dataset *rt_dataset);
 
+/* Take an idle dataset matching these dimensions out of the device pool, or
+ * NULL if the pool has none -- the caller then creates one as before. The
+ * returned dataset is owned exclusively by the caller until it is given back.
+ */
+struct pvr_rt_dataset *pvr_rt_dataset_pool_take(struct pvr_device *device,
+                                                uint32_t width,
+                                                uint32_t height,
+                                                uint32_t samples,
+                                                uint32_t layers);
+
+/* Return a dataset for reuse. Destroys it instead if the pool is full. */
+void pvr_rt_dataset_pool_give(struct pvr_rt_dataset *rt_dataset);
+
+/* Destroy everything left in the pool. Called from device teardown. */
+void pvr_rt_dataset_pool_finish(struct pvr_device *device);
+
 static inline void
 pvr_render_targets_datasets_destroy(struct pvr_render_target *render_target)
 {
    u_foreach_bit (valid_idx, render_target->valid_mask) {
       struct pvr_rt_dataset *rt_dataset = render_target->rt_dataset[valid_idx];
 
+      /* Back to the pool, not destroyed: rebuilding this every frame costs a
+       * free list, several buffers and an RGXCreateHWRTDataSet. Ownership is
+       * still exclusive -- see pvr_rt_dataset_pool_take().
+       */
       if (rt_dataset && render_target->valid_mask & BITFIELD_BIT(valid_idx))
-         pvr_render_target_dataset_destroy(rt_dataset);
+         pvr_rt_dataset_pool_give(rt_dataset);
 
       render_target->rt_dataset[valid_idx] = NULL;
       render_target->valid_mask &= ~BITFIELD_BIT(valid_idx);

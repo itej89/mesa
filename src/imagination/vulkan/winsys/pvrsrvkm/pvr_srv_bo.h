@@ -141,6 +141,14 @@ struct pvr_srv_winsys_vma {
 
    /* Required when mapping whole PMR, used for display buffers mapping. */
    void *mapping;
+
+   /* True when the mapping was made with DevmemIntMapPMR rather than
+    * DevmemIntMapPages. The unmap has to match the map: unmapping a whole-PMR
+    * mapping with UnmapPages leaves the DEVMEMINT_MAPPING alive, and with it
+    * the PMR reference and the PMRLockSysPhysAddresses() that MapPMR took, so
+    * the PMR's pages are never freed.
+    */
+   bool mapped_whole_pmr;
 };
 
 /*******************************************

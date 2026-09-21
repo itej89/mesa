@@ -609,6 +609,8 @@ VkResult pvr_srv_winsys_vma_map(struct pvr_winsys_vma *vma,
 
    buffer_acquire(srv_bo);
 
+   srv_vma->mapped_whole_pmr = mapped_whole_pmr;
+
    vma->bo = bo;
    vma->bo_offset = offset;
    vma->mapped_size = aligned_virt_size;
@@ -649,7 +651,13 @@ void pvr_srv_winsys_vma_unmap(struct pvr_winsys_vma *vma)
 
    srv_bo = to_pvr_srv_winsys_bo(vma->bo);
 
-   if (srv_bo->is_display_buffer) {
+   /*
+    * Must mirror pvr_srv_winsys_vma_map() exactly. Testing is_display_buffer
+    * alone missed every buffer mapped because of PVR_FORCE_MAP_PMR, and
+    * unmapping those with UnmapPages left the mapping -- and the PMR's page
+    * references -- alive for good.
+    */
+   if (srv_vma->mapped_whole_pmr) {
       /* Unmap the requested pmr */
       pvr_srv_int_unmap_pmr(srv_ws->base.render_fd, srv_vma->mapping);
    } else {

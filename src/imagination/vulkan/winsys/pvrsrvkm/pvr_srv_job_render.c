@@ -76,6 +76,15 @@ struct pvr_srv_winsys_rt_dataset {
       void *handle;
       struct pvr_srv_sync_prim *sync_prim;
    } rt_datas[ROGUE_FWIF_NUM_RTDATAS];
+
+   /*
+    * Every HWRTData the kernel made, which on this DDK is more than the two
+    * rt_datas above: SUPPORT_AGP makes RGXMKIF_NUM_RTDATAS 4. Each one holds
+    * a reference on the freelists, so all of them have to be destroyed or the
+    * freelist never reaches refCount 0, RGXDestroyFreeList keeps returning
+    * RETRY, and its backing PMR is leaked.
+    */
+   void *ddk119_handles[PVR_SRV_DDK119_NUM_RTDATAS];
 };
 
 #define to_pvr_srv_winsys_rt_dataset(rt_dataset) \
@@ -174,12 +183,18 @@ void pvr_srv_render_target_dataset_destroy(
    struct pvr_srv_winsys_rt_dataset *srv_rt_dataset =
       to_pvr_srv_winsys_rt_dataset(rt_dataset);
 
-   for (uint32_t i = 0; i < ARRAY_SIZE(srv_rt_dataset->rt_datas); i++) {
+   for (uint32_t i = 0; i < ARRAY_SIZE(srv_rt_dataset->rt_datas); i++)
       pvr_srv_sync_prim_free(srv_ws, srv_rt_dataset->rt_datas[i].sync_prim);
 
-      if (srv_rt_dataset->rt_datas[i].handle) {
+   /*
+    * Every HWRTData, not just the two with sync prims. rt_datas[0..1].handle
+    * are the first two of these, so destroying the array covers them; leaving
+    * the others alive pinned the freelist at refCount 2 and leaked its PMR.
+    */
+   for (uint32_t i = 0; i < PVR_SRV_DDK119_NUM_RTDATAS; i++) {
+      if (srv_rt_dataset->ddk119_handles[i]) {
          pvr_srv_rgx_destroy_hwrt_dataset(srv_ws->base.render_fd,
-                                          srv_rt_dataset->rt_datas[i].handle);
+                                          srv_rt_dataset->ddk119_handles[i]);
       }
    }
 

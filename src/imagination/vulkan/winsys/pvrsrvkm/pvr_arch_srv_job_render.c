@@ -80,6 +80,15 @@ struct pvr_srv_winsys_rt_dataset {
       void *handle;
       struct pvr_srv_sync_prim *sync_prim;
    } rt_datas[ROGUE_FWIF_NUM_RTDATAS];
+
+   /*
+    * Every HWRTData the kernel made, which on this DDK is more than the two
+    * rt_datas above: SUPPORT_AGP makes RGXMKIF_NUM_RTDATAS 4. Each one holds
+    * a reference on the freelists, so all of them have to be destroyed or the
+    * freelist never reaches refCount 0, RGXDestroyFreeList keeps returning
+    * RETRY, and its backing PMR is leaked.
+    */
+   void *ddk119_handles[PVR_SRV_DDK119_NUM_RTDATAS];
 };
 
 #define to_pvr_srv_winsys_rt_dataset(rt_dataset) \
@@ -313,17 +322,50 @@ VkResult PVR_PER_ARCH(srv_render_target_dataset_create)(
    const struct pvr_device_info *dev_info,
    struct pvr_winsys_rt_dataset **const rt_dataset_out)
 {
-   const pvr_dev_addr_t macrotile_addrs[ROGUE_FWIF_NUM_RTDATAS] = {
+   /*
+    * DDK119_INPUT_ARRAYS: the kernel reads RGXMKIF_NUM_RTDATAS (4) and
+    * RGXMKIF_NUM_GEOMDATAS (4) entries from these, not Mesa's 2 and 1 --
+    * PVRSRVBridgeRGXCreateHWRTDataSet() sizes its copy-in from its own
+    * constants. Arrays of two, and plain &single_value for the geometry ones,
+    * meant six out-of-bounds reads per dataset creation and stack garbage
+    * ending up as device addresses in firmware structures.
+    *
+    * Mesa prepares and submits only two RT datas, and this GPU reports one
+    * core, so datasets 2 and 3 are structural. Repeat what we have rather than
+    * leave the slots to chance -- and repeat like for like: see
+    * DDK119_FREELIST_SLOTS below for what putting the wrong *kind* of entry in
+    * a spare slot did to the firmware.
+    */
+   const pvr_dev_addr_t macrotile_addrs[PVR_SRV_DDK119_NUM_RTDATAS] = {
       [0] = create_info->rt_datas[0].macrotile_array_dev_addr,
       [1] = create_info->rt_datas[1].macrotile_array_dev_addr,
+      [2] = create_info->rt_datas[0].macrotile_array_dev_addr,
+      [3] = create_info->rt_datas[1].macrotile_array_dev_addr,
    };
-   const pvr_dev_addr_t pm_mlist_addrs[ROGUE_FWIF_NUM_RTDATAS] = {
+   const pvr_dev_addr_t pm_mlist_addrs[PVR_SRV_DDK119_NUM_RTDATAS] = {
       [0] = create_info->rt_datas[0].pm_mlist_dev_addr,
       [1] = create_info->rt_datas[1].pm_mlist_dev_addr,
+      [2] = create_info->rt_datas[0].pm_mlist_dev_addr,
+      [3] = create_info->rt_datas[1].pm_mlist_dev_addr,
    };
-   const pvr_dev_addr_t rgn_header_addrs[ROGUE_FWIF_NUM_RTDATAS] = {
+   const pvr_dev_addr_t rgn_header_addrs[PVR_SRV_DDK119_NUM_RTDATAS] = {
       [0] = create_info->rt_datas[0].rgn_header_dev_addr,
       [1] = create_info->rt_datas[1].rgn_header_dev_addr,
+      [2] = create_info->rt_datas[0].rgn_header_dev_addr,
+      [3] = create_info->rt_datas[1].rgn_header_dev_addr,
+   };
+   /* Per-geometry-data, and Mesa computes exactly one of each. */
+   const pvr_dev_addr_t ddk119_rtc_addrs[PVR_SRV_DDK119_NUM_GEOMDATAS] = {
+      create_info->rtc_dev_addr, create_info->rtc_dev_addr,
+      create_info->rtc_dev_addr, create_info->rtc_dev_addr,
+   };
+   const pvr_dev_addr_t ddk119_tpc_addrs[PVR_SRV_DDK119_NUM_GEOMDATAS] = {
+      create_info->tpc_dev_addr, create_info->tpc_dev_addr,
+      create_info->tpc_dev_addr, create_info->tpc_dev_addr,
+   };
+   const pvr_dev_addr_t ddk119_vheap_addrs[PVR_SRV_DDK119_NUM_GEOMDATAS] = {
+      create_info->vheap_table_dev_addr, create_info->vheap_table_dev_addr,
+      create_info->vheap_table_dev_addr, create_info->vheap_table_dev_addr,
    };
 
    struct pvr_srv_winsys *srv_ws = to_pvr_srv_winsys(ws);
@@ -334,7 +376,10 @@ VkResult PVR_PER_ARCH(srv_render_target_dataset_create)(
     * the kernel reads past it and rejects the garbage as free lists. */
    void *free_lists[12] = { NULL };
    struct pvr_srv_winsys_rt_dataset *srv_rt_dataset;
-   void *handles[ROGUE_FWIF_NUM_RTDATAS];
+   /* The kernel writes RGXMKIF_NUM_RTDATAS of these through
+    * cmd.hwrt_dataset. A ROGUE_FWIF_NUM_RTDATAS (2) array here
+    * was two pointers too short, i.e. a stack overflow. */
+   void *handles[PVR_SRV_DDK119_NUM_RTDATAS] = { NULL };
    struct pvr_rogue_cr_te rogue_te_regs;
    struct pvr_rt_mtile_info mtile_info;
    uint32_t isp_mtile_size;
@@ -362,8 +407,6 @@ VkResult PVR_PER_ARCH(srv_render_target_dataset_create)(
        * This DDK build says otherwise, and the kernel is the authority here:
        * RGXMKIF_NUM_RTDATAS 4 x RGXFW_MAX_FREELISTS 3 = the twelve handles it
        * copies. Use the DDK's shape, not Mesa's. */
-#define PVR_SRV_DDK119_NUM_RTDATAS  4U
-#define PVR_SRV_DDK119_NUM_FREELISTS 3U
       for (unsigned rt = 0; rt < PVR_SRV_DDK119_NUM_RTDATAS; rt++) {
          void **slot = &free_lists[rt * PVR_SRV_DDK119_NUM_FREELISTS];
 
@@ -408,10 +451,10 @@ VkResult PVR_PER_ARCH(srv_render_target_dataset_create)(
       pvr_rogue_get_cr_multisamplectl_val(create_info->samples, false),
       macrotile_addrs,
       pm_mlist_addrs,
-      &create_info->rtc_dev_addr,
+      ddk119_rtc_addrs,
       rgn_header_addrs,
-      &create_info->tpc_dev_addr,
-      &create_info->vheap_table_dev_addr,
+      ddk119_tpc_addrs,
+      ddk119_vheap_addrs,
       free_lists,
       create_info->isp_merge_lower_x,
       create_info->isp_merge_lower_y,
@@ -434,6 +477,10 @@ VkResult PVR_PER_ARCH(srv_render_target_dataset_create)(
    if (result != VK_SUCCESS)
       goto err_vk_free_srv_rt_dataset;
 
+   /* Keep every handle so teardown can release every reference. */
+   for (uint32_t i = 0; i < PVR_SRV_DDK119_NUM_RTDATAS; i++)
+      srv_rt_dataset->ddk119_handles[i] = handles[i];
+
    srv_rt_dataset->rt_datas[0].handle = handles[0];
    srv_rt_dataset->rt_datas[1].handle = handles[1];
 
@@ -450,12 +497,13 @@ VkResult PVR_PER_ARCH(srv_render_target_dataset_create)(
    return VK_SUCCESS;
 
 err_srv_sync_prim_free:
-   for (uint32_t i = 0; i < ARRAY_SIZE(srv_rt_dataset->rt_datas); i++) {
+   for (uint32_t i = 0; i < ARRAY_SIZE(srv_rt_dataset->rt_datas); i++)
       pvr_srv_sync_prim_free(srv_ws, srv_rt_dataset->rt_datas[i].sync_prim);
 
-      if (srv_rt_dataset->rt_datas[i].handle) {
+   for (uint32_t i = 0; i < PVR_SRV_DDK119_NUM_RTDATAS; i++) {
+      if (srv_rt_dataset->ddk119_handles[i]) {
          pvr_srv_rgx_destroy_hwrt_dataset(ws->render_fd,
-                                          srv_rt_dataset->rt_datas[i].handle);
+                                          srv_rt_dataset->ddk119_handles[i]);
       }
    }
 

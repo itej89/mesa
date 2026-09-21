@@ -1,3 +1,4 @@
+#include <stdlib.h>
 /*
  * Copyright © 2022 Imagination Technologies Ltd.
  *
@@ -653,9 +654,28 @@ VkResult pvr_arch_render_target_dataset_create(
     * the hardware. See the documentation of ROGUE_FREE_LIST_MAX_SIZE for more
     * details.
     */
+   /*
+    * PVR_LOCAL_FL_MULT: size the local free list above the hardware minimum.
+    *
+    * The firmware trace shows every 3D command blocking on a partial-render
+    * check against the free list ("UFO PR-Check: is 0x18ba requires >= 0x18bb"),
+    * so each render waits for the previous one to release parameter memory.
+    * That serialises rendering and leaves the GPU idle ~90% of the time. A
+    * minimum-size list with grow_size 0 cannot hold more than one render's
+    * worth of parameter data.
+    */
+   uint32_t fl_mult = 1;
+   {
+      const char *fl_env = getenv("PVR_LOCAL_FL_MULT");
+      if (fl_env)
+         fl_mult = (uint32_t)atoi(fl_env);
+      if (fl_mult < 1)
+         fl_mult = 1;
+   }
+
    result = pvr_free_list_create(device,
-                                 runtime_info->min_free_list_size,
-                                 runtime_info->min_free_list_size,
+                                 runtime_info->min_free_list_size * fl_mult,
+                                 runtime_info->min_free_list_size * fl_mult,
                                  0 /* grow_size */,
                                  0 /* grow_threshold */,
                                  rt_dataset->global_free_list,

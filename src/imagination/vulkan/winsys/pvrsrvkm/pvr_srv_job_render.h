@@ -96,4 +96,18 @@ void PVR_PER_ARCH(srv_geometry_cmd_init)(
    const struct pvr_device_info *const dev_info);
 #endif
 
+/*
+ * What this DDK build actually uses, as opposed to what Mesa's own headers
+ * assume. rgx_fwif_shared.h picks these under SUPPORT_AGP:
+ *
+ *     RGXMKIF_NUM_RTDATAS  4      (Mesa's ROGUE_FWIF_NUM_RTDATAS is 2)
+ *     RGXFW_MAX_FREELISTS  3      LOCAL, GLOBAL, GLOBAL2
+ *
+ * The kernel is the authority: it creates RGXMKIF_NUM_RTDATAS HWRTDatas and
+ * writes that many handles back through the bridge.
+ */
+#define PVR_SRV_DDK119_NUM_RTDATAS   4U
+#define PVR_SRV_DDK119_NUM_FREELISTS 3U
+#define PVR_SRV_DDK119_NUM_GEOMDATAS 4U
+
 #endif /* PVR_SRV_JOB_RENDER_H */
