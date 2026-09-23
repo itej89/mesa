@@ -751,6 +751,7 @@ VkResult PVR_PER_ARCH(create_device)(struct pvr_physical_device *pdevice,
 
    pvr_bo_cache_init(device);
    pvr_load_op_shader_cache_init(device);
+   pvr_eot_shader_cache_init(device);
 
    result = pvr_bo_store_create(device);
    if (result != VK_SUCCESS)
@@ -911,6 +912,7 @@ err_dec_device_count:
    pvr_bo_suballocator_fini(&device->suballoc_pds);
    pvr_bo_suballocator_fini(&device->suballoc_general);
 
+   pvr_eot_shader_cache_fini(device);
    pvr_load_op_shader_cache_fini(device);
    pvr_bo_cache_fini(device);
    pvr_bo_store_destroy(device);
@@ -976,6 +978,7 @@ void PVR_PER_ARCH(destroy_device)(struct pvr_device *device,
    pvr_bo_suballocator_fini(&device->suballoc_transfer);
    pvr_bo_suballocator_fini(&device->suballoc_pds);
    pvr_bo_suballocator_fini(&device->suballoc_general);
+   pvr_eot_shader_cache_fini(device);
    pvr_load_op_shader_cache_fini(device);
    pvr_bo_cache_fini(device);
    pvr_bo_store_destroy(device);

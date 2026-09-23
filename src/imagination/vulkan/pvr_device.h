@@ -52,6 +52,12 @@ struct pvr_compute_query_shader {
 };
 
 struct pvr_load_op_shader_cache;
+struct pvr_eot_shader_cache;
+
+void pvr_eot_shader_cache_init(struct pvr_device *device);
+void pvr_eot_shader_cache_fini(struct pvr_device *device);
+pco_shader *pvr_eot_shader_get(struct pvr_device *device,
+                               struct pvr_eot_props *props);
 
 void pvr_load_op_shader_cache_init(struct pvr_device *device);
 void pvr_load_op_shader_cache_fini(struct pvr_device *device);
@@ -146,6 +152,7 @@ struct pvr_device {
    struct pvr_bo_cache bo_cache;
 
    struct pvr_load_op_shader_cache *load_op_shader_cache;
+   struct pvr_eot_shader_cache *eot_shader_cache;
 
    struct pvr_bo *robustness_buffer;
 

@@ -590,7 +590,12 @@ VkResult pvr_arch_spm_init_eot_state(
 
    memcpy(props.tile_buffer_addrs, tile_buffer_addrs, sizeof(tile_buffer_addrs));
 
-   eot = pvr_usc_eot(device->pdevice->pco_ctx, &props, dev_info);
+   /* Cached on the device: a framebuffer is created per frame under
+    * dynamic rendering, but the end-of-tile program repeats.
+    */
+   eot = pvr_eot_shader_get(device, &props);
+   if (!eot)
+      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
    usc_temp_count = pco_shader_data(eot)->common.temps;
 
    /* TODO: Create a #define in the compiler code to replace the 16. */
@@ -600,7 +605,7 @@ VkResult pvr_arch_spm_init_eot_state(
                                16,
                                &spm_eot_state->usc_eot_program);
 
-   ralloc_free(eot);
+   /* Owned by the device end-of-tile shader cache. */
 
    if (result != VK_SUCCESS)
       return result;

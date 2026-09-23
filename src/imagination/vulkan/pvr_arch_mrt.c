@@ -24,6 +24,8 @@
 #include "vulkan/runtime/vk_image.h"
 #include "util/ralloc.h"
 #include <stdlib.h>
+#include "pvr_usc.h"
+#include "hwdef/rogue_hw_defs.h"
 
 /* Which parts of the output registers/a tile buffer are currently allocated. */
 struct pvr_mrt_alloc_mask {
@@ -823,6 +825,171 @@ pvr_load_op_shader_get(struct pvr_device *device,
 
    /* Either the cache owns it now or it was full; either way the lifetime is
     * the cache's ralloc context, never the caller's.
+    */
+   ralloc_steal(cache->ralloc_ctx, shader);
+
+   return shader;
+}
+
+
+/* A handful of distinct end-of-tile programs is normal; a swapchain cycles
+ * through one per image. Bounded all the same.
+ */
+#define PVR_EOT_CACHE_MAX 32
+
+void pvr_eot_shader_cache_init(struct pvr_device *device)
+{
+   struct pvr_eot_shader_cache *cache;
+
+   device->eot_shader_cache = NULL;
+   if (getenv("PVR_NO_EOT_CACHE"))
+      return;
+
+   /* Not fatal if this fails: without a cache every call simply compiles,
+    * which is what happened before.
+    */
+   cache = vk_alloc(&device->vk.alloc,
+                    sizeof(*cache),
+                    8,
+                    VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+   device->eot_shader_cache = cache;
+   if (!cache)
+      return;
+
+   simple_mtx_init(&cache->mutex, mtx_plain);
+   list_inithead(&cache->entries);
+   cache->count = 0;
+   cache->ralloc_ctx = ralloc_context(NULL);
+}
+
+void pvr_eot_shader_cache_fini(struct pvr_device *device)
+{
+   struct pvr_eot_shader_cache *cache = device->eot_shader_cache;
+
+   if (!cache)
+      return;
+
+   list_for_each_entry_safe (struct pvr_eot_cache_entry,
+                             entry,
+                             &cache->entries,
+                             link) {
+      list_del(&entry->link);
+      vk_free(&device->vk.alloc, entry);
+   }
+
+   cache->count = 0;
+   simple_mtx_destroy(&cache->mutex);
+
+   /* Frees every cached shader in one go. */
+   ralloc_free(cache->ralloc_ctx);
+
+   vk_free(&device->vk.alloc, cache);
+   device->eot_shader_cache = NULL;
+}
+
+static void pvr_eot_key_init(struct pvr_eot_key *key,
+                             const struct pvr_eot_props *props)
+{
+   bool any_tile_buffer = false;
+
+   memset(key, 0, sizeof(*key));
+
+   key->emit_count = props->emit_count;
+   key->shared_words = props->shared_words;
+
+   for (unsigned u = 0; u < props->emit_count; u++) {
+      if (u >= PVR_MAX_COLOR_ATTACHMENTS)
+         break;
+
+      key->emits[u].tile_buffer_addr = props->tile_buffer_addrs[u];
+      any_tile_buffer |= props->tile_buffer_addrs[u] != 0;
+
+      if (props->shared_words) {
+         key->emits[u].state0 = props->state_regs[u];
+      } else {
+         const unsigned off = u * ROGUE_NUM_PBESTATE_STATE_WORDS;
+
+         key->emits[u].state0 = props->state_words[off];
+         key->emits[u].state1 = props->state_words[off + 1];
+      }
+   }
+
+   /* Only read when an emit has a tile buffer, and only filled in by the
+    * caller in that case -- keying on them otherwise would miss every frame
+    * on uninitialised values.
+    */
+   if (any_tile_buffer) {
+      key->msaa_samples = props->msaa_samples;
+      key->num_output_regs = props->num_output_regs;
+   }
+}
+
+pco_shader *pvr_eot_shader_get(struct pvr_device *device,
+                               struct pvr_eot_props *props)
+{
+   struct pvr_eot_shader_cache *cache = device->eot_shader_cache;
+   struct pvr_eot_key key;
+   pco_shader *shader = NULL;
+   struct pvr_eot_cache_entry *entry;
+
+   if (!cache) {
+      return pvr_usc_eot(device->pdevice->pco_ctx,
+                         props,
+                         &device->pdevice->dev_info);
+   }
+
+   pvr_eot_key_init(&key, props);
+
+   simple_mtx_lock(&cache->mutex);
+
+   list_for_each_entry (struct pvr_eot_cache_entry, it, &cache->entries, link) {
+      if (memcmp(&it->key, &key, sizeof(key)) == 0) {
+         shader = it->shader;
+         break;
+      }
+   }
+
+   simple_mtx_unlock(&cache->mutex);
+
+   if (shader)
+      return shader;
+
+   shader = pvr_usc_eot(device->pdevice->pco_ctx,
+                        props,
+                        &device->pdevice->dev_info);
+   if (!shader)
+      return NULL;
+
+   entry = vk_alloc(&device->vk.alloc,
+                    sizeof(*entry),
+                    8,
+                    VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+   if (!entry) {
+      /* Not fatal, just uncached; reparent so it is still freed with the
+       * device rather than leaked.
+       */
+      ralloc_steal(cache->ralloc_ctx, shader);
+      return shader;
+   }
+
+   entry->key = key;
+   entry->shader = shader;
+
+   simple_mtx_lock(&cache->mutex);
+
+   if (cache->count < PVR_EOT_CACHE_MAX) {
+      list_add(&entry->link, &cache->entries);
+      cache->count++;
+      entry = NULL;
+   }
+
+   simple_mtx_unlock(&cache->mutex);
+
+   if (entry)
+      vk_free(&device->vk.alloc, entry);
+
+   /* Either the cache owns it now or the cache was full; either way its
+    * lifetime is the cache's ralloc context, never the caller's.
     */
    ralloc_steal(cache->ralloc_ctx, shader);
 

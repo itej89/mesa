@@ -18,6 +18,8 @@
 #include "pco/pco.h"
 #include "pvr_common.h"
 #include "pvr_formats.h"
+#include "util/list.h"
+#include "util/simple_mtx.h"
 
 struct pvr_load_op;
 
@@ -38,6 +40,39 @@ struct pvr_eot_props {
 };
 
 nir_shader *pvr_usc_fs_pfo_passthrough_nir (pco_ctx *ctx);
+
+/* Everything pvr_usc_eot() reads, and nothing else. Zero-initialised and
+ * compared with memcmp, so padding cannot cause a false match.
+ */
+struct pvr_eot_key {
+   uint32_t emit_count;
+   uint32_t shared_words;
+   uint32_t msaa_samples;
+   uint32_t num_output_regs;
+   struct {
+      uint64_t tile_buffer_addr;
+      uint32_t state0;
+      uint32_t state1;
+   } emits[PVR_MAX_COLOR_ATTACHMENTS];
+};
+
+struct pvr_eot_cache_entry {
+   struct list_head link;
+   struct pvr_eot_key key;
+   pco_shader *shader;
+};
+
+/* Compiled end-of-tile shaders, kept for the life of the device. */
+struct pvr_eot_shader_cache {
+   simple_mtx_t mutex;
+   struct list_head entries;
+   uint32_t count;
+
+   /* Cached shaders outlive the call that built them, and pvr_device is not
+    * a ralloc context, so they are reparented onto this.
+    */
+   void *ralloc_ctx;
+};
 
 pco_shader *pvr_usc_eot(pco_ctx *ctx,
                         struct pvr_eot_props *props,

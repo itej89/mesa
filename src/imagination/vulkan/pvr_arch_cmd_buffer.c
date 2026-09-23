@@ -582,8 +582,12 @@ static VkResult pvr_sub_cmd_gfx_per_job_fragment_programs_create_and_upload(
          props.msaa_samples = 1;
    }
 
-   eot =
-      pvr_usc_eot(device->pdevice->pco_ctx, &props, &device->pdevice->dev_info);
+   /* Cached on the device: this is rebuilt twice a frame otherwise, and the
+    * program only depends on the emit state, which repeats.
+    */
+   eot = pvr_eot_shader_get(device, &props);
+   if (!eot)
+      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
    usc_temp_count = pco_shader_data(eot)->common.temps;
 
    result = pvr_cmd_buffer_upload_usc(cmd_buffer,
@@ -592,7 +596,7 @@ static VkResult pvr_sub_cmd_gfx_per_job_fragment_programs_create_and_upload(
                                       4,
                                       &usc_eot_program);
 
-   ralloc_free(eot);
+   /* Owned by the device end-of-tile shader cache. */
 
    if (result != VK_SUCCESS)
       return result;
