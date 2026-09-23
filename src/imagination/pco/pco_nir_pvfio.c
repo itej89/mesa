@@ -559,6 +559,15 @@ static bool lower_isp_fb(nir_builder *b, struct pfo_state *state)
       has_depth_feedback = true;
    }
 
+   /* At one sample per pixel gl_SampleID is 0, so the check below reduces
+    * to "bit 0 of the sample mask is clear". When the mask is static and
+    * that bit is set it can never fire: eight instruction groups per pixel
+    * of dead code, and -- because it sets has_discards -- it also pins the
+    * ISP pass type to PUNCH_THROUGH and rules out hidden-surface removal.
+    */
+   if (!state->has_sample_check && state->fs->uses.single_sample_static_mask)
+      state->has_sample_check = true;
+
    if (!state->has_sample_check) {
       b->cursor = nir_after_instr(&state->last_discard_store->instr);
 
@@ -584,6 +593,19 @@ static bool lower_isp_fb(nir_builder *b, struct pfo_state *state)
    else
       b->cursor = nir_after_block(
          nir_impl_last_block(nir_shader_get_entrypoint(b->shader)));
+
+   /* With neither a discard nor depth feedback there is nothing to report,
+    * and the alphaf that would be emitted here is the one thing keeping the
+    * object out of the OPAQUE pass type. Worse, an OPAQUE object that does
+    * report alpha feedback renders nothing and stalls for a constant 149 ms.
+    * Internal shaders already take this path -- they return early above --
+    * and they render correctly.
+    */
+   if (!state->has_discards && !has_depth_feedback) {
+      state->fs->uses.discard = false;
+      state->fs->uses.depth_feedback = false;
+      return true;
+   }
 
    nir_def *undef = nir_undef(b, 1, 32);
 

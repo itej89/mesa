@@ -179,7 +179,17 @@ static void pvr_physical_device_get_supported_extensions(
       .KHR_vertex_attribute_divisor = true,
       .KHR_zero_initialize_workgroup_memory = false,
       .EXT_border_color_swizzle = true,
-      .EXT_color_write_enable = true,
+      /* Implemented by reading the previous pixel back out of po0,
+       * unpacking it, bcsel-ing four channels and repacking -- five
+       * instruction groups for every pixel of every fragment shader. It
+       * also sets fs.uses.fbfetch, which pins the ISP pass type to
+       * TRANSLUCENT and rules out hidden-surface removal entirely. zink
+       * enables the extension in every pipeline whenever it is offered, so
+       * the whole GL stack paid that price. Until it is implemented in PBE
+       * state rather than in the shader, not offering it is much cheaper:
+       * zink guards every use behind have_EXT_color_write_enable.
+       */
+      .EXT_color_write_enable = false,
       .EXT_custom_border_color = true,
       .EXT_depth_clamp_zero_one = true,
       .EXT_depth_clip_enable = true,

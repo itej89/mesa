@@ -2699,6 +2699,15 @@ pvr_preprocess_shader_data(pco_data *data,
       data->fs.meta_present.alpha_to_one =
          BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_MS_ALPHA_TO_ONE_ENABLE);
 
+      /* See lower_isp_fb(): the per-sample coverage check is dead when there
+       * is one sample and the mask provably lets it through.
+       */
+      data->fs.uses.single_sample_static_mask =
+         state->ms && state->ms->rasterization_samples <= 1 &&
+         !BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES) &&
+         !BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_MS_SAMPLE_MASK) &&
+         (state->ms->sample_mask & 1);
+
       if (BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES) ||
           (state->cb && state->cb->color_write_enables !=
                            BITFIELD_MASK(MESA_VK_MAX_COLOR_ATTACHMENTS))) {

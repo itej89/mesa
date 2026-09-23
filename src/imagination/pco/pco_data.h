@@ -126,6 +126,10 @@ typedef struct _pco_fs_data {
       bool sample_locations;
       bool alpha_to_coverage;
       bool alpha_to_one;
+      /* One sample per pixel, with a sample mask that is
+       * static and has bit 0 set -- so the per-sample
+       * coverage check can never discard anything. */
+      bool single_sample_static_mask;
       bool olchk_skip;
    } uses;
 
