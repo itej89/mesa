@@ -125,11 +125,18 @@ typedef struct _pco_fs_data {
       bool sample_shading;
       bool sample_locations;
       bool alpha_to_coverage;
+      bool alpha_to_one;
       bool olchk_skip;
    } uses;
 
    struct {
       bool color_write_enable;
+      /* True when the state is dynamic and so still has to be tested per
+       * pixel out of fs_meta. When false the value in uses.* is final, and
+       * the lowering can be folded to a constant or skipped outright.
+       */
+      bool alpha_to_coverage;
+      bool alpha_to_one;
    } meta_present;
 } pco_fs_data;
 

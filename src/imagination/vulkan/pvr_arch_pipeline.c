@@ -2684,8 +2684,20 @@ pvr_preprocess_shader_data(pco_data *data,
       pvr_init_fs_tile_buffers(data);
 
       data->fs.uses.alpha_to_coverage = false;
-      if (state->ms)
+      data->fs.uses.alpha_to_one = false;
+      if (state->ms) {
          data->fs.uses.alpha_to_coverage = state->ms->alpha_to_coverage_enable;
+         data->fs.uses.alpha_to_one = state->ms->alpha_to_one_enable;
+      }
+
+      /* Only a dynamic state has to be tested per pixel out of fs_meta;
+       * otherwise the values above are final and the lowerings can fold.
+       */
+      data->fs.meta_present.alpha_to_coverage =
+         BITSET_TEST(state->dynamic,
+                     MESA_VK_DYNAMIC_MS_ALPHA_TO_COVERAGE_ENABLE);
+      data->fs.meta_present.alpha_to_one =
+         BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_MS_ALPHA_TO_ONE_ENABLE);
 
       if (BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES) ||
           (state->cb && state->cb->color_write_enables !=

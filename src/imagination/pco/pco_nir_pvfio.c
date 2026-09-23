@@ -702,18 +702,34 @@ static bool lower_demote_samples(nir_builder *b,
    return true;
 }
 
-bool pco_nir_lower_alpha_to_coverage(nir_shader *shader)
+bool pco_nir_lower_alpha_to_coverage(nir_shader *shader, pco_fs_data *fs)
 {
    if (shader->info.internal)
+      return false;
+
+   /* Alpha-to-coverage is static in a VkPipeline unless the dynamic state is
+    * enabled. With it statically off there is nothing to lower, and the
+    * runtime test of fs_meta bit 25 -- eleven instruction groups run for
+    * every pixel -- is pure cost.
+    */
+   if (!fs->meta_present.alpha_to_coverage && !fs->uses.alpha_to_coverage)
       return false;
 
    nir_builder b = nir_builder_create(nir_shader_get_entrypoint(shader));
    b.cursor =
       nir_before_block(nir_start_block(nir_shader_get_entrypoint(shader)));
-   nir_def *a2c_enabled = nir_ine_imm(
-      &b,
-      nir_ubitfield_extract_imm(&b, nir_load_fs_meta_pco(&b), 25, 1),
-      0);
+   /* Only read the state word when the state can actually change; otherwise
+    * feed a constant so the condition folds away.
+    */
+   nir_def *a2c_enabled =
+      fs->meta_present.alpha_to_coverage
+         ? nir_ine_imm(&b,
+                       nir_ubitfield_extract_imm(&b,
+                                                 nir_load_fs_meta_pco(&b),
+                                                 25,
+                                                 1),
+                       0)
+         : nir_imm_true(&b);
 
    nir_lower_alpha_to_coverage(shader, true, a2c_enabled);
 
@@ -726,7 +742,7 @@ bool pco_nir_lower_alpha_to_coverage(nir_shader *shader)
 }
 
 static nir_def *
-lower_alpha_to_one(nir_builder *b, nir_instr *instr, UNUSED void *cb_data)
+lower_alpha_to_one(nir_builder *b, nir_instr *instr, void *cb_data)
 {
    nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
 
@@ -742,10 +758,14 @@ lower_alpha_to_one(nir_builder *b, nir_instr *instr, UNUSED void *cb_data)
    b->cursor = nir_before_instr(&intr->instr);
 
    /* TODO: define or other way of representing bit 0 of metadata... */
+   const struct pfo_state *state = cb_data;
    nir_def *alpha_to_one_enabled =
-      nir_ine_imm(b,
-                  nir_ubitfield_extract_imm(b, nir_load_fs_meta_pco(b), 0, 1),
-                  0);
+      state->fs->meta_present.alpha_to_one
+         ? nir_ine_imm(
+              b,
+              nir_ubitfield_extract_imm(b, nir_load_fs_meta_pco(b), 0, 1),
+              0)
+         : nir_imm_true(b);
 
    nir_def *alpha = nir_bcsel(b,
                               alpha_to_one_enabled,
@@ -852,7 +872,11 @@ bool pco_nir_pfo(nir_shader *shader, pco_fs_data *fs)
    /* TODO: instead of doing multiple passes, probably better to just cache all
     * the stores
     */
-   if (!shader->info.internal) {
+   /* Statically off means the bcsel would always pick the shader's own
+    * alpha, so the whole lowering is dead code.
+    */
+   if (!shader->info.internal &&
+       (fs->meta_present.alpha_to_one || fs->uses.alpha_to_one)) {
       progress |= nir_shader_lower_instructions(shader,
                                                 is_frag_color_out,
                                                 lower_alpha_to_one,
