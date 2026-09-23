@@ -52,6 +52,7 @@
 #include "util/u_debug.h"
 #include "vk_alloc.h"
 #include "vk_log.h"
+#include <stdlib.h>
 
 struct pvr_bo_store {
    struct rb_tree tree;
@@ -338,6 +339,110 @@ static inline void pvr_bo_free_bo(const struct pvr_device *const device,
  *
  * \sa #pvr_bo_free()
  */
+
+/* Bounds on the buffer cache. This board is expected to stay up for months,
+ * so the cache is capped by count, by total bytes, and by the size of any
+ * single buffer, rather than growing to whatever the peak frame needed.
+ */
+static void pvr_bo_real_free(struct pvr_device *device,
+                             struct pvr_bo *pvr_bo);
+
+#define PVR_BO_CACHE_MAX_BOS 64
+#define PVR_BO_CACHE_MAX_BYTES (16 * 1024 * 1024)
+#define PVR_BO_CACHE_MAX_BO_SIZE (1024 * 1024)
+
+void pvr_bo_cache_init(struct pvr_device *device)
+{
+   struct pvr_bo_cache *cache = &device->bo_cache;
+
+   simple_mtx_init(&cache->mutex, mtx_plain);
+   list_inithead(&cache->bos);
+   cache->count = 0;
+   cache->bytes = 0;
+   cache->disabled = getenv("PVR_NO_BO_CACHE") != NULL;
+}
+
+void pvr_bo_cache_fini(struct pvr_device *device)
+{
+   struct pvr_bo_cache *cache = &device->bo_cache;
+
+   list_for_each_entry_safe (struct pvr_bo, pvr_bo, &cache->bos, link) {
+      list_del(&pvr_bo->link);
+      pvr_bo_real_free(device, pvr_bo);
+   }
+
+   cache->count = 0;
+   cache->bytes = 0;
+
+   simple_mtx_destroy(&cache->mutex);
+}
+
+/* Returns a released buffer that was created with exactly these parameters,
+ * or NULL. Anything less than an exact match would hand back a buffer with
+ * the wrong mapping, cache behaviour or alignment.
+ */
+static struct pvr_bo *pvr_bo_cache_take(struct pvr_device *device,
+                                        struct pvr_winsys_heap *heap,
+                                        uint64_t size,
+                                        uint64_t alignment,
+                                        uint64_t flags)
+{
+   struct pvr_bo_cache *cache = &device->bo_cache;
+   struct pvr_bo *found = NULL;
+
+   if (cache->disabled)
+      return NULL;
+
+   simple_mtx_lock(&cache->mutex);
+
+   list_for_each_entry (struct pvr_bo, pvr_bo, &cache->bos, link) {
+      if (pvr_bo->cached_heap == heap && pvr_bo->cached_size == size &&
+          pvr_bo->cached_alignment == alignment &&
+          pvr_bo->cached_flags == flags) {
+         found = pvr_bo;
+         break;
+      }
+   }
+
+   if (found) {
+      list_del(&found->link);
+      cache->count--;
+      cache->bytes -= found->cached_size;
+   }
+
+   simple_mtx_unlock(&cache->mutex);
+
+   return found;
+}
+
+/* Takes ownership of pvr_bo and returns true, or leaves it alone and returns
+ * false so the caller destroys it as before.
+ */
+static bool pvr_bo_cache_put(struct pvr_device *device, struct pvr_bo *pvr_bo)
+{
+   struct pvr_bo_cache *cache = &device->bo_cache;
+   bool kept = false;
+
+   if (cache->disabled || pvr_bo->cached_size == 0 ||
+       pvr_bo->cached_size > PVR_BO_CACHE_MAX_BO_SIZE) {
+      return false;
+   }
+
+   simple_mtx_lock(&cache->mutex);
+
+   if (cache->count < PVR_BO_CACHE_MAX_BOS &&
+       cache->bytes + pvr_bo->cached_size <= PVR_BO_CACHE_MAX_BYTES) {
+      list_add(&pvr_bo->link, &cache->bos);
+      cache->count++;
+      cache->bytes += pvr_bo->cached_size;
+      kept = true;
+   }
+
+   simple_mtx_unlock(&cache->mutex);
+
+   return kept;
+}
+
 VkResult pvr_bo_alloc(struct pvr_device *device,
                       struct pvr_winsys_heap *heap,
                       uint64_t size,
@@ -347,6 +452,16 @@ VkResult pvr_bo_alloc(struct pvr_device *device,
 {
    struct pvr_bo *pvr_bo;
    VkResult result;
+
+   /* An identical buffer that has already been created, mapped and bound is
+    * a list pop instead of a PMR create, a reservation and a map.
+    */
+   pvr_bo = pvr_bo_cache_take(device, heap, size, alignment, flags);
+   if (pvr_bo) {
+      pvr_bo->ref_count = 1;
+      *pvr_bo_out = pvr_bo;
+      return VK_SUCCESS;
+   }
 
    pvr_bo = pvr_bo_alloc_bo(device);
    if (!pvr_bo) {
@@ -382,6 +497,12 @@ VkResult pvr_bo_alloc(struct pvr_device *device,
       goto err_heap_free;
 
    pvr_bo_store_insert(device->bo_store, pvr_bo);
+
+   pvr_bo->cached_heap = heap;
+   pvr_bo->cached_size = size;
+   pvr_bo->cached_alignment = alignment;
+   pvr_bo->cached_flags = flags;
+
    *pvr_bo_out = pvr_bo;
 
    return VK_SUCCESS;
@@ -467,14 +588,9 @@ void pvr_bo_cpu_unmap(struct pvr_device *device, struct pvr_bo *pvr_bo)
  *
  * \sa #pvr_bo_alloc()
  */
-void pvr_bo_free(struct pvr_device *device, struct pvr_bo *pvr_bo)
+static void pvr_bo_real_free(struct pvr_device *device,
+                             struct pvr_bo *pvr_bo)
 {
-   if (!pvr_bo)
-      return;
-
-   if (!p_atomic_dec_zero(&pvr_bo->ref_count))
-      return;
-
 #if defined(HAVE_VALGRIND)
    vk_free(&device->vk.alloc, pvr_bo->bo->vbits);
 #endif /* defined(HAVE_VALGRIND) */
@@ -490,6 +606,23 @@ void pvr_bo_free(struct pvr_device *device, struct pvr_bo *pvr_bo)
    device->ws->ops->buffer_destroy(pvr_bo->bo);
 
    pvr_bo_free_bo(device, pvr_bo);
+}
+
+void pvr_bo_free(struct pvr_device *device, struct pvr_bo *pvr_bo)
+{
+   if (!pvr_bo)
+      return;
+
+   if (!p_atomic_dec_zero(&pvr_bo->ref_count))
+      return;
+
+   /* Nothing references it any more, so the GPU cannot still be reading it:
+    * keeping it is exactly as safe as the destroy it replaces.
+    */
+   if (pvr_bo_cache_put(device, pvr_bo))
+      return;
+
+   pvr_bo_real_free(device, pvr_bo);
 }
 
 /**

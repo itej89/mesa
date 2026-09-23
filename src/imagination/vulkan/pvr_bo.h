@@ -57,6 +57,15 @@ struct pvr_bo {
    struct pvr_winsys_bo *bo;
    struct pvr_winsys_vma *vma;
    uint32_t ref_count;
+
+   /* The parameters this buffer was created with. Kept so that pvr_bo_free()
+    * can hand it to the device buffer cache and pvr_bo_alloc() can tell
+    * whether a cached buffer is an exact substitute for a new one.
+    */
+   struct pvr_winsys_heap *cached_heap;
+   uint64_t cached_size;
+   uint64_t cached_alignment;
+   uint64_t cached_flags;
 };
 
 struct pvr_suballocator {
@@ -150,6 +159,22 @@ pvr_bo_cpu_map_unchanged(struct pvr_device *device, struct pvr_bo *pvr_bo)
    return pvr_bo_cpu_map(device, pvr_bo);
 }
 #endif /* defined(HAVE_VALGRIND) */
+
+/* A small free list of buffers that have been released but not returned to
+ * the kernel, so that the next allocation of the same shape is a list pop
+ * rather than a PMR create, reserve and map. Control stream chunks alone
+ * account for several of those round trips per frame.
+ */
+struct pvr_bo_cache {
+   simple_mtx_t mutex;
+   struct list_head bos;
+   uint32_t count;
+   uint64_t bytes;
+   bool disabled;
+};
+
+void pvr_bo_cache_init(struct pvr_device *device);
+void pvr_bo_cache_fini(struct pvr_device *device);
 
 struct pvr_bo_store;
 
