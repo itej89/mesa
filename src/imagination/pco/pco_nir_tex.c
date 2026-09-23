@@ -335,14 +335,31 @@ nir_intrinsic_instr *pco_emit_nir_smp(nir_builder *b, pco_smp_params *params)
       smp_flags.wrt = true;
    }
 
-   /* Pad out the rest of the data words. */
+   /* Pad out the rest of the data words.
+    *
+    * Only `count` of them are ever read -- the intrinsic carries it as
+    * .range, and lower_smp() narrows the source to it -- so widen to the
+    * next legal NIR vector size rather than all the way to
+    * NIR_MAX_VEC_COMPONENTS. The padding beyond that is dead, but it does
+    * not stay dead: it reaches the back end as real writes of zero, which
+    * for an ordinary two-dimensional texture2D() meant thirteen extra
+    * instruction groups executed for every pixel.
+    */
    assert(count <= NIR_MAX_VEC_COMPONENTS);
 
+   unsigned width;
+   if (count <= 5)
+      width = count;
+   else if (count <= 8)
+      width = 8;
+   else
+      width = NIR_MAX_VEC_COMPONENTS;
+
    nir_def *undef = nir_undef(b, 1, 32);
-   for (unsigned c = count; c < ARRAY_SIZE(comps); ++c)
+   for (unsigned c = count; c < width; ++c)
       comps[c] = undef;
 
-   nir_def *smp_data = nir_vec(b, comps, ARRAY_SIZE(comps));
+   nir_def *smp_data = nir_vec(b, comps, width);
 
    if (params->sample_coeffs) {
       assert(!params->sample_raw);
