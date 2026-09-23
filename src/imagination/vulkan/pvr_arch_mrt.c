@@ -22,6 +22,8 @@
 #include "vulkan/vulkan_core.h"
 #include "vulkan/runtime/vk_graphics_state.h"
 #include "vulkan/runtime/vk_image.h"
+#include "util/ralloc.h"
+#include <stdlib.h>
 
 /* Which parts of the output registers/a tile buffer are currently allocated. */
 struct pvr_mrt_alloc_mask {
@@ -638,6 +640,195 @@ static VkResult pvr_pds_fragment_program_create_and_upload(
    return VK_SUCCESS;
 }
 
+/* Far more than the handful of distinct load ops a real application has, but
+ * still bounded: this board is expected to stay up for months.
+ */
+#define PVR_LOAD_OP_CACHE_MAX 32
+
+void pvr_load_op_shader_cache_init(struct pvr_device *device)
+{
+   struct pvr_load_op_shader_cache *cache;
+
+   /* PVR_NO_LOADOP_CACHE=1 disables this for A/B measurement. */
+   device->load_op_shader_cache = NULL;
+   if (getenv("PVR_NO_LOADOP_CACHE"))
+      return;
+
+   /* Not fatal if this fails: without a cache every load op simply compiles
+    * its shader, which is what happened before.
+    */
+   cache = vk_alloc(&device->vk.alloc,
+                    sizeof(*cache),
+                    8,
+                    VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+   device->load_op_shader_cache = cache;
+   if (!cache)
+      return;
+
+   simple_mtx_init(&cache->mutex, mtx_plain);
+   list_inithead(&cache->entries);
+   cache->count = 0;
+   cache->ralloc_ctx = ralloc_context(NULL);
+}
+
+void pvr_load_op_shader_cache_fini(struct pvr_device *device)
+{
+   struct pvr_load_op_shader_cache *cache = device->load_op_shader_cache;
+
+   if (!cache)
+      return;
+
+   list_for_each_entry_safe (struct pvr_load_op_cache_entry,
+                             entry,
+                             &cache->entries,
+                             link) {
+      list_del(&entry->link);
+      vk_free(&device->vk.alloc, entry);
+    }
+
+   cache->count = 0;
+   simple_mtx_destroy(&cache->mutex);
+
+   /* Frees every cached shader in one go. */
+   ralloc_free(cache->ralloc_ctx);
+
+   vk_free(&device->vk.alloc, cache);
+   device->load_op_shader_cache = NULL;
+}
+
+static void pvr_load_op_key_init(struct pvr_load_op_key *key,
+                                 const struct pvr_load_op *load_op)
+{
+   const struct usc_mrt_setup *mrt_setup =
+      load_op->clears_loads_state.mrt_setup;
+   uint32_t rt_mask;
+
+   memset(key, 0, sizeof(*key));
+
+   key->rt_clear_mask = load_op->clears_loads_state.rt_clear_mask;
+   key->rt_load_mask = load_op->clears_loads_state.rt_load_mask;
+   key->rt_2d_view_3d_mask = load_op->clears_loads_state.rt_2d_view_3d_mask;
+   key->unresolved_msaa_mask =
+      load_op->clears_loads_state.unresolved_msaa_mask;
+   key->depth_clear_to_reg = load_op->clears_loads_state.depth_clear_to_reg;
+
+   for (uint32_t i = 0; i < PVR_LOAD_OP_CLEARS_LOADS_MAX_RTS; i++)
+      key->dest_vk_format[i] = load_op->clears_loads_state.dest_vk_format[i];
+
+   if (!mrt_setup)
+      return;
+
+   /* The render targets the shader actually touches, plus the depth target
+    * if there is one: pvr_uscgen_loadop() indexes mrt_resources with
+    * depth_clear_to_reg as well, and that index need not be in either mask.
+    * Everything else stays zeroed so unrelated state cannot split the key.
+    */
+   rt_mask = key->rt_clear_mask | key->rt_load_mask;
+   if (key->depth_clear_to_reg != PVR_NO_DEPTH_CLEAR_TO_REG &&
+       key->depth_clear_to_reg >= 0) {
+      rt_mask |= BITFIELD_BIT(key->depth_clear_to_reg);
+   }
+
+   u_foreach_bit (i, rt_mask) {
+      const struct usc_mrt_resource *res;
+
+      if (i >= PVR_LOAD_OP_CLEARS_LOADS_MAX_RTS ||
+          i >= mrt_setup->num_render_targets) {
+         continue;
+      }
+
+      res = &mrt_setup->mrt_resources[i];
+
+      key->resources[i].type = res->type;
+      key->resources[i].intermediate_size = res->intermediate_size;
+
+      if (res->type == USC_MRT_RESOURCE_TYPE_OUTPUT_REG) {
+         key->resources[i].output_reg = res->reg.output_reg;
+      } else if (res->type == USC_MRT_RESOURCE_TYPE_MEMORY) {
+         key->resources[i].tile_buffer = res->mem.tile_buffer;
+         key->resources[i].offset_dw = res->mem.offset_dw;
+      }
+   }
+}
+
+static pco_shader *
+pvr_load_op_shader_get(struct pvr_device *device,
+                       struct pvr_load_op *load_op)
+{
+   struct pvr_load_op_shader_cache *cache = device->load_op_shader_cache;
+   struct pvr_load_op_key key;
+   pco_shader *shader = NULL;
+   struct pvr_load_op_cache_entry *entry;
+
+   if (!cache)
+      return pvr_uscgen_loadop(device->pdevice->pco_ctx, load_op);
+
+   pvr_load_op_key_init(&key, load_op);
+
+   simple_mtx_lock(&cache->mutex);
+
+   list_for_each_entry (struct pvr_load_op_cache_entry,
+                        it,
+                        &cache->entries,
+                        link) {
+      if (memcmp(&it->key, &key, sizeof(key)) == 0) {
+         /* Replay what the generator would have written. */
+         load_op->const_shareds_count = it->const_shareds_count;
+         load_op->shareds_count = it->shareds_count;
+         load_op->num_tile_buffers = it->num_tile_buffers;
+         shader = it->shader;
+         break;
+      }
+   }
+
+   simple_mtx_unlock(&cache->mutex);
+
+   if (shader)
+      return shader;
+
+   shader = pvr_uscgen_loadop(device->pdevice->pco_ctx, load_op);
+   if (!shader)
+      return NULL;
+
+   entry = vk_alloc(&device->vk.alloc,
+                    sizeof(*entry),
+                    8,
+                    VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+   if (!entry) {
+      /* Not fatal, just uncached: the shader stays owned by this call and is
+       * reparented so it is still freed with the device.
+       */
+      ralloc_steal(cache->ralloc_ctx, shader);
+      return shader;
+   }
+
+   entry->key = key;
+   entry->shader = shader;
+   entry->const_shareds_count = load_op->const_shareds_count;
+   entry->shareds_count = load_op->shareds_count;
+   entry->num_tile_buffers = load_op->num_tile_buffers;
+
+   simple_mtx_lock(&cache->mutex);
+
+   if (cache->count < PVR_LOAD_OP_CACHE_MAX) {
+      list_add(&entry->link, &cache->entries);
+      cache->count++;
+      entry = NULL;
+   }
+
+   simple_mtx_unlock(&cache->mutex);
+
+   if (entry)
+      vk_free(&device->vk.alloc, entry);
+
+   /* Either the cache owns it now or it was full; either way the lifetime is
+    * the cache's ralloc context, never the caller's.
+    */
+   ralloc_steal(cache->ralloc_ctx, shader);
+
+   return shader;
+}
+
 VkResult
 pvr_arch_load_op_shader_generate(struct pvr_device *device,
                                  const VkAllocationCallbacks *allocator,
@@ -646,7 +837,12 @@ pvr_arch_load_op_shader_generate(struct pvr_device *device,
    const struct pvr_device_info *dev_info = &device->pdevice->dev_info;
    const uint32_t cache_line_size = pvr_get_slc_cache_line_size(dev_info);
 
-   pco_shader *loadop = pvr_uscgen_loadop(device->pdevice->pco_ctx, load_op);
+   /* Cached for the life of the device: under dynamic rendering this
+    * load op is rebuilt every frame but compiles to the same shader.
+    */
+   pco_shader *loadop = pvr_load_op_shader_get(device, load_op);
+   if (!loadop)
+      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    VkResult result = pvr_gpu_upload_usc(device,
                                         pco_shader_binary_data(loadop),
@@ -655,7 +851,7 @@ pvr_arch_load_op_shader_generate(struct pvr_device *device,
                                         &load_op->usc_frag_prog_bo);
 
    if (result != VK_SUCCESS) {
-      ralloc_free(loadop);
+      /* Owned by the device load-op shader cache; not freed here. */
       return result;
    }
 
@@ -671,7 +867,7 @@ pvr_arch_load_op_shader_generate(struct pvr_device *device,
                                                  msaa);
 
    load_op->temps_count = pco_shader_data(loadop)->common.temps;
-   ralloc_free(loadop);
+   /* Owned by the device load-op shader cache; not freed here. */
 
    if (result != VK_SUCCESS)
       goto err_free_usc_frag_prog_bo;

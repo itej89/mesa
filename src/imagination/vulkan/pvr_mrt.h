@@ -14,6 +14,10 @@
 
 #include "pvr_common.h"
 #include "pvr_macros.h"
+typedef struct _pco_shader pco_shader;
+
+#include "util/list.h"
+#include "util/simple_mtx.h"
 
 struct pvr_device;
 struct pvr_dynamic_render_info;
@@ -142,6 +146,54 @@ struct pvr_load_op {
    uint32_t view_indices[PVR_MAX_MULTIVIEW];
 
    uint32_t view_count;
+};
+
+/* Everything pvr_uscgen_loadop() reads, and nothing else. Zero-initialised
+ * and compared with memcmp, so padding cannot cause a false match.
+ */
+struct pvr_load_op_key {
+   uint16_t rt_clear_mask;
+   uint16_t rt_load_mask;
+   uint16_t rt_2d_view_3d_mask;
+   uint16_t unresolved_msaa_mask;
+   int32_t depth_clear_to_reg;
+   uint32_t dest_vk_format[PVR_LOAD_OP_CLEARS_LOADS_MAX_RTS];
+   struct {
+      uint32_t type;
+      uint32_t intermediate_size;
+      uint32_t output_reg;
+      uint32_t tile_buffer;
+      uint32_t offset_dw;
+   } resources[PVR_LOAD_OP_CLEARS_LOADS_MAX_RTS];
+};
+
+struct pvr_load_op_cache_entry {
+   struct list_head link;
+   struct pvr_load_op_key key;
+   pco_shader *shader;
+
+   /* pvr_uscgen_loadop() does not just return a shader, it also fills these
+    * in on the load op it is given. A cache hit skips that call, so they have
+    * to be replayed or the PDS program uploads no shared registers and
+    * neither clear colours nor load texture state reach the shader.
+    */
+   uint32_t const_shareds_count;
+   uint32_t shareds_count;
+   uint32_t num_tile_buffers;
+};
+
+/* Compiled load-op shaders, kept for the life of the device. Under dynamic
+ * rendering a load op is rebuilt every frame but is identical every time.
+ */
+struct pvr_load_op_shader_cache {
+   simple_mtx_t mutex;
+   struct list_head entries;
+   uint32_t count;
+
+   /* Cached shaders outlive the load op they were compiled for, and
+    * pvr_device is not a ralloc context, so they are reparented onto this.
+    */
+   void *ralloc_ctx;
 };
 
 struct pvr_load_op_state {
